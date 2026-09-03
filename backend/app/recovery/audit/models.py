@@ -37,6 +37,9 @@ class AuditEventType(str, Enum):
     RECOVERY_RECOVERED = "recovery_recovered"
     RECOVERY_NOT_RECOVERED = "recovery_not_recovered"
 
+    # Reminder lifecycle
+    REMINDER_SENT = "reminder_sent"
+
 
 def _generate_audit_event_id() -> str:
     return "audit_" + uuid.uuid4().hex[:24]

@@ -92,10 +92,15 @@ class ContextualBandit:
         # Build context key for learning (must match learning service).
         context_key = self._build_context_key(context)
 
-        # Try Thompson Sampling if learning store is available and
-        # there are multiple eligible candidates.
+        # Try Thompson Sampling if learning store is available,
+        # there are multiple eligible candidates, AND at least one
+        # candidate has verified terminal outcomes beyond the prior.
         if self._learning_store is not None and len(eligible) > 1:
-            return self._thompson_select(eligible, context, context_key)
+            has_learning = self._has_verified_learning(
+                eligible, context, context_key,
+            )
+            if has_learning:
+                return self._thompson_select(eligible, context, context_key)
 
         # Fallback: deterministic priority.
         return self._deterministic_select(eligible, context, context_key)
@@ -165,6 +170,28 @@ class ContextualBandit:
 
         return BanditSelection(selected=best, selection_reason=reason)
 
+    def _has_verified_learning(
+        self,
+        eligible: list[CandidateAction],
+        context: AgentContext,
+        context_key: str,
+    ) -> bool:
+        """Check whether any candidate has verified terminal outcomes.
+
+        Returns True if at least one candidate's statistics have
+        ``total_verified_trials > 0`` (i.e. at least one RECOVERED or
+        NOT_RECOVERED outcome beyond the Beta(1,1) prior).
+        """
+        for candidate in eligible:
+            stats = self._learning_store.get_or_create(
+                merchant_id=context.merchant_id,
+                capability_id=candidate.capability_id,
+                context_key=context_key,
+            )
+            if stats.total_verified_trials > 0:
+                return True
+        return False
+
     @staticmethod
     def _build_context_key(context: AgentContext) -> str:
         """Build the context key matching the learning service format."""
@@ -173,8 +200,36 @@ class ContextualBandit:
         urgency = context.urgency or "medium"
         return f"{signal_type}|{failure_source}|{urgency}"
 
-    @staticmethod
+    def _get_candidate_statistics(
+        self,
+        eligible: list[CandidateAction],
+        context: AgentContext,
+        context_key: str,
+    ) -> dict[str, dict] | None:
+        """Retrieve per-candidate learning statistics for logging.
+
+        Returns None when no learning store is configured.
+        """
+        if self._learning_store is None:
+            return None
+
+        result: dict[str, dict] = {}
+        for candidate in eligible:
+            stats = self._learning_store.get_or_create(
+                merchant_id=context.merchant_id,
+                capability_id=candidate.capability_id,
+                context_key=context_key,
+            )
+            result[candidate.capability_id] = {
+                "successes": stats.successes,
+                "failures": stats.failures,
+                "total_verified_trials": stats.total_verified_trials,
+                "empirical_success_rate": round(stats.empirical_success_rate, 4),
+            }
+        return result
+
     def _log_selection(
+        self,
         *,
         context: AgentContext,
         selected: CandidateAction,
@@ -189,7 +244,7 @@ class ContextualBandit:
             "case_id": context.case_id,
             "merchant_id": context.merchant_id,
             "context_key": context_key,
-            "selected_capability_id": selected.capability_id,
+            "selected_strategy": selected.capability_id,
             "selected_action_type": selected.action_type.value,
             "eligible_candidates": [c.capability_id for c in eligible],
             "eligible_count": len(eligible),
@@ -201,4 +256,11 @@ class ContextualBandit:
                 k: round(v, 4) for k, v in scores.items()
             }
 
-        logger.info("bandit_action_selected", extra=extra)
+        # Include per-candidate statistics when the store is available.
+        candidate_stats = self._get_candidate_statistics(
+            eligible, context, context_key,
+        )
+        if candidate_stats is not None:
+            extra["candidate_statistics"] = candidate_stats
+
+        logger.info("agent_bandit_decision", extra=extra)

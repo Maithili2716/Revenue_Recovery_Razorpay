@@ -2,6 +2,9 @@ import logging
 
 from fastapi import FastAPI
 
+from app.api.dashboard import router as dashboard_router
+from app.api.demo import router as demo_router
+from app.api.evaluation import router as evaluation_router
 from app.api.razorpay_webhooks import router as razorpay_webhooks_router
 from app.api.recovery import router as recovery_router
 
@@ -66,9 +69,11 @@ app = FastAPI()
 
 app.include_router(razorpay_webhooks_router)
 app.include_router(recovery_router)
+app.include_router(dashboard_router)
+app.include_router(demo_router)
+app.include_router(evaluation_router)
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
-

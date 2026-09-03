@@ -229,6 +229,9 @@ def test_agent_decide_produces_decision() -> None:
     assert decision.decision_source == DecisionSource.CONTEXTUAL_BANDIT
     assert "payment_link_recovery" in decision.candidate_action_ids
     assert decision.decision_id.startswith("dec_")
+    assert decision.diagnosis is not None
+    assert decision.diagnosis.category == DiagnosisCategory.PAYMENT_FAILURE
+    assert decision.diagnosis.primary_reason == "bank_decline"
 
 
 def test_decision_id_is_deterministic() -> None:

@@ -117,6 +117,7 @@ class Diagnosis(BaseModel):
 
 class ActionType(str, Enum):
     CREATE_PAYMENT_LINK = "create_payment_link"
+    SEND_PAYMENT_LINK_REMINDER = "send_payment_link_reminder"
 
 
 class EligibilityStatus(str, Enum):
@@ -197,6 +198,10 @@ class AgentDecision(BaseModel):
     )
 
     decision_source: DecisionSource
+
+    # The bounded diagnosis already computed for this decision.  Retaining it
+    # avoids a second diagnosis pass when audit/read models need evidence.
+    diagnosis: Diagnosis | None = None
 
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)

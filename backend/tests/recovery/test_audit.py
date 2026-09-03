@@ -190,6 +190,7 @@ class TestSanitization:
             "recovery_webhook_received",
             "recovery_recovered",
             "recovery_not_recovered",
+            "reminder_sent",
         }
         actual = {e.value for e in AuditEventType}
         assert expected == actual

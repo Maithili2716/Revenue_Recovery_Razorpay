@@ -24,6 +24,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.policy.models import PolicyDecision
+
 
 # ---------------------------------------------------------------------------
 # Execution Status
@@ -106,6 +108,10 @@ class ExecutionResult(BaseModel):
     action_type: str
 
     status: ExecutionStatus
+
+    # The single policy decision that authorized or blocked this execution.
+    # It is preserved for audit/read-model observability, never recomputed.
+    policy_decision: PolicyDecision | None = None
 
     # Provider information
     provider: str = Field(

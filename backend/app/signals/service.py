@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config import settings
+from app.demo.store import get_demo_session_store
 from app.integrations.razorpay.events import RazorpayWebhookEvent
 from app.recovery.agent.service import AdaptiveRecoveryAgent
 from app.recovery.audit.models import AuditEventType
@@ -169,6 +170,10 @@ def ingest_webhook_event(event: RazorpayWebhookEvent) -> SignalIngestionResult:
         return SignalIngestionResult(signal=None, supported=False)
 
     _log_signal(event, signal)
+    get_demo_session_store().link_payment_failure(
+        order_id=_extract_payment_order_id(event.payload),
+        signal=signal,
+    )
     _run_pipeline(signal)
     return SignalIngestionResult(signal=signal, supported=True)
 
@@ -228,6 +233,25 @@ def _log_signal(event: RazorpayWebhookEvent, signal: RevenueSignal) -> None:
     )
 
 
+def _extract_payment_order_id(payload: dict[str, Any]) -> str | None:
+    """Return the source order ID when a payment webhook includes one.
+
+    This is demo-only correlation metadata.  It does not alter signal
+    normalization or recovery decisions when absent.
+    """
+    nested_payload = payload.get("payload")
+    if not isinstance(nested_payload, dict):
+        return None
+    payment = nested_payload.get("payment")
+    if not isinstance(payment, dict):
+        return None
+    entity = payment.get("entity")
+    if not isinstance(entity, dict):
+        return None
+    order_id = entity.get("order_id")
+    return order_id if isinstance(order_id, str) and order_id else None
+
+
 def _is_terminal(status: VerificationStatus) -> bool:
     """Return True if the verification status is terminal (no further checks)."""
     return status in (VerificationStatus.RECOVERED, VerificationStatus.NOT_RECOVERED)
@@ -253,6 +277,11 @@ def _run_pipeline(signal: RevenueSignal) -> RecoveryPipelineResult | None:
     if case is None:
         return None
 
+    get_demo_session_store().link_recovery_case(
+        signal_id=signal.signal_id,
+        case_id=case.case_id,
+    )
+
     # Audit: CASE_CREATED
     _audit_service.record(
         event_type=AuditEventType.CASE_CREATED,
@@ -270,8 +299,25 @@ def _run_pipeline(signal: RevenueSignal) -> RecoveryPipelineResult | None:
         },
     )
 
+    # --- Check for existing pending Payment Link ---
+    existing_pending = _pending_store.get_by_case_id(case.case_id)
+    pending_payment_link_id: str | None = None
+    if existing_pending is not None:
+        pending_payment_link_id = existing_pending.payment_link_id
+
+    logger.info(
+        "agent_pending_link_context",
+        extra={
+            "case_id": case.case_id,
+            "pending_payment_link_id": pending_payment_link_id,
+            "has_pending_payment_link": pending_payment_link_id is not None,
+        },
+    )
+
     # --- Agent decision ---
-    decision = _agent.decide(signal, case)
+    decision = _agent.decide(
+        signal, case, pending_payment_link_id=pending_payment_link_id
+    )
     if decision is None:
         logger.info(
             "agent_no_decision",
@@ -281,6 +327,46 @@ def _run_pipeline(signal: RevenueSignal) -> RecoveryPipelineResult | None:
             },
         )
         return None
+
+    if decision.diagnosis is not None:
+        diagnosis = decision.diagnosis
+        _audit_service.record(
+            event_type=AuditEventType.DIAGNOSIS_CREATED,
+            case_id=case.case_id,
+            merchant_id=case.merchant_id,
+            actor="adaptive_recovery_agent",
+            signal_id=case.signal_id,
+            decision_id=decision.decision_id,
+            data={
+                "category": diagnosis.category.value,
+                "primary_reason": diagnosis.primary_reason,
+                "failure_stage": diagnosis.failure_stage.value,
+                "confidence": diagnosis.confidence,
+                "diagnosis_source": diagnosis.diagnosis_source,
+            },
+        )
+
+    # --- Compute canonical context_key ONCE ---
+    # This is the single source of truth for the learning context.
+    # It must be preserved through PendingRecovery so that
+    # the event-driven verification path (webhook) uses the same key.
+    context_key = build_context_key(
+        signal_type=signal.signal_type.value,
+        failure_source=signal.failure_source or "unknown",
+        urgency=case.urgency.value,
+    )
+
+    logger.info(
+        "canonical_context_key_computed",
+        extra={
+            "case_id": case.case_id,
+            "decision_id": decision.decision_id,
+            "context_key": context_key,
+            "signal_type": signal.signal_type.value,
+            "failure_source": signal.failure_source or "unknown",
+            "urgency": case.urgency.value,
+        },
+    )
 
     # Audit: DECISION_CREATED
     _audit_service.record(
@@ -296,6 +382,7 @@ def _run_pipeline(signal: RevenueSignal) -> RecoveryPipelineResult | None:
             "candidate_action_ids": decision.candidate_action_ids,
             "decision_source": decision.decision_source.value,
             "reason": decision.reason,
+            "context_key": context_key,
         },
     )
 
@@ -314,6 +401,16 @@ def _run_pipeline(signal: RevenueSignal) -> RecoveryPipelineResult | None:
         data={
             "execution_status": execution_result.status.value,
             "capability_id": execution_result.capability_id,
+            "verdict": (
+                execution_result.policy_decision.verdict.value
+                if execution_result.policy_decision is not None
+                else None
+            ),
+            "reasons": (
+                execution_result.policy_decision.reasons
+                if execution_result.policy_decision is not None
+                else []
+            ),
         },
     )
 
@@ -334,6 +431,40 @@ def _run_pipeline(signal: RevenueSignal) -> RecoveryPipelineResult | None:
         },
     )
 
+    # Audit: REMINDER_SENT for reminder-type capabilities.
+    if execution_result.capability_id == "payment_link_reminder":
+        _audit_service.record(
+            event_type=AuditEventType.REMINDER_SENT,
+            case_id=case.case_id,
+            merchant_id=case.merchant_id,
+            actor="payment_link_reminder_capability",
+            signal_id=case.signal_id,
+            decision_id=decision.decision_id,
+            execution_id=execution_result.execution_id,
+            data={
+                "capability_id": execution_result.capability_id,
+                "payment_link_id": execution_result.provider_reference,
+                "medium": (
+                    execution_result.metadata.get("medium")
+                    if execution_result.metadata
+                    else None
+                ),
+                "status": execution_result.status.value,
+                "error_message": execution_result.error_message,
+            },
+        )
+
+        logger.info(
+            "audit_event_recorded",
+            extra={
+                "event_type": AuditEventType.REMINDER_SENT.value,
+                "case_id": case.case_id,
+                "capability_id": execution_result.capability_id,
+                "payment_link_id": execution_result.provider_reference,
+                "status": execution_result.status.value,
+            },
+        )
+
     logger.info(
         "pipeline_execution_result",
         extra={
@@ -351,7 +482,16 @@ def _run_pipeline(signal: RevenueSignal) -> RecoveryPipelineResult | None:
     )
 
     # --- Store pending recovery correlation ---
-    if execution_result.status == ExecutionStatus.EXECUTED and execution_result.provider_reference:
+    # Only create a pending entry for NEW payment link creations.
+    # Reminders re-use the existing pending entry — they must NOT create
+    # a duplicate or overwrite the original.
+    _is_new_payment_link = (
+        execution_result.status == ExecutionStatus.EXECUTED
+        and execution_result.provider_reference
+        and execution_result.capability_id != "payment_link_reminder"
+    )
+
+    if _is_new_payment_link:
         pending = PendingRecovery(
             payment_link_id=execution_result.provider_reference,
             case_id=case.case_id,
@@ -362,6 +502,7 @@ def _run_pipeline(signal: RevenueSignal) -> RecoveryPipelineResult | None:
             signal_id=case.signal_id,
             amount_at_risk_minor=case.amount_at_risk_minor,
             currency=case.currency,
+            context_key=context_key,
         )
         _pending_store.store(pending)
 
@@ -391,10 +532,15 @@ def _run_pipeline(signal: RevenueSignal) -> RecoveryPipelineResult | None:
     )
 
     # --- Learning (only for terminal outcomes) ---
-    context_key = build_context_key(
-        signal_type=signal.signal_type.value,
-        failure_source=signal.failure_source or "unknown",
-        urgency=case.urgency.value,
+    # context_key was computed once above (canonical_context_key_computed).
+    # Re-use it here — never reconstruct independently.
+    logger.info(
+        "learning_context_key_used",
+        extra={
+            "case_id": case.case_id,
+            "context_key": context_key,
+            "path": "inline_pipeline",
+        },
     )
 
     learning_updated = _learning_service.record_outcome(
@@ -800,7 +946,17 @@ def _perform_independent_verification(
 
         if was_new:
             # Learning update — only once per recovery
-            context_key = build_context_key()
+            # Use the canonical context_key preserved on PendingRecovery.
+            # This is the same key the bandit used when selecting this action.
+            context_key = pending.context_key
+            logger.info(
+                "learning_context_key_used",
+                extra={
+                    "case_id": pending.case_id,
+                    "context_key": context_key,
+                    "path": "webhook_verification",
+                },
+            )
             learning_updated = _learning_service.record_outcome(
                 merchant_id=pending.merchant_id,
                 capability_id=pending.capability_id,
@@ -857,7 +1013,16 @@ def _perform_independent_verification(
             pending.payment_link_id, "not_recovered", source
         )
 
-        context_key = build_context_key()
+        # Use the canonical context_key preserved on PendingRecovery.
+        context_key = pending.context_key
+        logger.info(
+            "learning_context_key_used",
+            extra={
+                "case_id": pending.case_id,
+                "context_key": context_key,
+                "path": "webhook_verification_not_recovered",
+            },
+        )
         learning_updated = _learning_service.record_outcome(
             merchant_id=pending.merchant_id,
             capability_id=pending.capability_id,
@@ -1069,4 +1234,3 @@ def verify_case_manually(case_id: str) -> RecoveryWebhookResult:
     )
 
     return _perform_independent_verification(pending, "manual")
-

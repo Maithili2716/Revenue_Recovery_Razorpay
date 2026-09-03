@@ -18,6 +18,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 
+from app.api.dashboard import RecoveryCasesResponse, recovery_cases_response
 from app.signals.service import verify_case_manually
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,16 @@ class ManualVerificationResponse(BaseModel):
     amount_recovered_minor: int = 0
     learning_updated: bool = False
     message: str = ""
+
+
+@router.get(
+    "/cases",
+    response_model=RecoveryCasesResponse,
+    summary="List known recovery cases from in-memory application state",
+)
+def list_recovery_cases() -> RecoveryCasesResponse:
+    """Return recent cases without producing or changing recovery state."""
+    return recovery_cases_response()
 
 
 @router.post(

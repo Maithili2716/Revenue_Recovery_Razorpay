@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     razorpay_key_id: str
     razorpay_key_secret: str
     razorpay_webhook_secret: str
+    demo_callback_url: str = "http://localhost:5173/recovery/demo-return"
 
     # LLM diagnosis — provider-neutral config.
     # Falls back to deterministic diagnosis when the API key is absent.

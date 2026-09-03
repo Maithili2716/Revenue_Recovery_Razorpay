@@ -5,6 +5,7 @@ Uses the existing RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET from settings.
 
 API reference:
     POST https://api.razorpay.com/v1/payment_links/
+    POST https://api.razorpay.com/v1/payment_links/{id}/notify_by/{medium}
     Auth: Basic Auth (key_id:key_secret)
 
 This module NEVER:
@@ -12,7 +13,7 @@ This module NEVER:
 - fabricates a successful payment
 - claims money was recovered
 
-It only creates the payment link and returns the provider response.
+It only creates/notifies payment links and returns the provider response.
 """
 
 from __future__ import annotations
@@ -38,6 +39,19 @@ class PaymentLinkResponse:
     short_url: str | None = None
     status: str | None = None
     raw_response: dict[str, Any] | None = None
+    error_message: str | None = None
+    http_status_code: int | None = None
+
+
+@dataclass(frozen=True)
+class NotifyResponse:
+    """Structured response from the Razorpay Payment Link notify API.
+
+    POST /v1/payment_links/{payment_link_id}/notify_by/{medium}
+    Expected successful response: {"success": true}
+    """
+
+    success: bool
     error_message: str | None = None
     http_status_code: int | None = None
 
@@ -151,6 +165,101 @@ class RazorpayPaymentLinkClient:
         except Exception as exc:
             logger.exception("razorpay_payment_link_unexpected_error")
             return PaymentLinkResponse(
+                success=False,
+                error_message=f"Unexpected error: {exc}",
+            )
+
+    def notify_by(
+        self,
+        *,
+        payment_link_id: str,
+        medium: str,
+    ) -> NotifyResponse:
+        """Send/resend a notification for an existing payment link.
+
+        Uses the Razorpay Payment Link notification API:
+        POST /v1/payment_links/{payment_link_id}/notify_by/{medium}
+
+        Args:
+            payment_link_id: The Razorpay payment link ID (e.g. plink_...).
+            medium: Notification medium — "sms" or "email".
+
+        Returns:
+            NotifyResponse with the API outcome.
+        """
+        if medium not in ("sms", "email"):
+            return NotifyResponse(
+                success=False,
+                error_message=f"Unsupported notification medium: {medium}. Must be 'sms' or 'email'.",
+            )
+
+        url = f"{_PAYMENT_LINKS_URL}{payment_link_id}/notify_by/{medium}"
+
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    url,
+                    auth=self._auth,
+                )
+
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, dict) and data.get("success") is True:
+                    return NotifyResponse(
+                        success=True,
+                        http_status_code=response.status_code,
+                    )
+
+            # Non-success response.
+            error_body = None
+            try:
+                error_body = response.json()
+            except Exception:
+                pass
+
+            error_msg = "Razorpay notify API error"
+            if isinstance(error_body, dict):
+                error_detail = error_body.get("error", {})
+                if isinstance(error_detail, dict):
+                    error_msg = error_detail.get("description", error_msg)
+
+            logger.warning(
+                "razorpay_notify_api_error",
+                extra={
+                    "http_status": response.status_code,
+                    "error_message": error_msg,
+                    "payment_link_id": payment_link_id,
+                    "medium": medium,
+                },
+            )
+
+            return NotifyResponse(
+                success=False,
+                error_message=error_msg,
+                http_status_code=response.status_code,
+            )
+
+        except httpx.TimeoutException:
+            logger.error(
+                "razorpay_notify_timeout",
+                extra={"payment_link_id": payment_link_id, "medium": medium},
+            )
+            return NotifyResponse(
+                success=False,
+                error_message="Razorpay notify API request timed out.",
+            )
+        except httpx.HTTPError as exc:
+            logger.error(
+                "razorpay_notify_http_error",
+                extra={"error": str(exc)},
+            )
+            return NotifyResponse(
+                success=False,
+                error_message=f"HTTP error: {exc}",
+            )
+        except Exception as exc:
+            logger.exception("razorpay_notify_unexpected_error")
+            return NotifyResponse(
                 success=False,
                 error_message=f"Unexpected error: {exc}",
             )

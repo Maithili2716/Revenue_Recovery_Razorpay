@@ -85,6 +85,7 @@ class CapabilityExecutor:
                 capability_id=decision.selected_capability_id,
                 action_type=decision.selected_action_type.value,
                 status=ExecutionStatus.BLOCKED,
+                policy_decision=policy_decision,
                 error_message=(
                     f"Policy blocked: {'; '.join(policy_decision.reasons)}"
                 ),
@@ -110,6 +111,7 @@ class CapabilityExecutor:
                 capability_id=decision.selected_capability_id,
                 action_type=decision.selected_action_type.value,
                 status=ExecutionStatus.FAILED,
+                policy_decision=policy_decision,
                 error_message=(
                     f"Capability '{decision.selected_capability_id}' not found in registry."
                 ),
@@ -164,4 +166,4 @@ class CapabilityExecutor:
                 error_message=f"Unexpected execution error: {exc}",
             )
 
-        return result
+        return result.model_copy(update={"policy_decision": policy_decision})

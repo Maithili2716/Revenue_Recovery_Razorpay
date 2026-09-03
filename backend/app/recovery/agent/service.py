@@ -21,7 +21,7 @@ import logging
 
 from app.config import settings
 from app.recovery.agent.bandit import ContextualBandit
-from app.recovery.agent.candidates import generate_candidates
+from app.recovery.agent.candidates import generate_candidates_with_context
 from app.recovery.agent.context import build_agent_context
 from app.recovery.agent.diagnosis import diagnose as deterministic_diagnose
 from app.recovery.agent.models import (
@@ -75,8 +75,18 @@ class AdaptiveRecoveryAgent:
         self,
         signal: RevenueSignal,
         recovery_case: RecoveryCase,
+        *,
+        pending_payment_link_id: str | None = None,
     ) -> AgentDecision | None:
         """Run the full agent decision pipeline.
+
+        Args:
+            signal: The incoming revenue signal.
+            recovery_case: The recovery case derived from the signal.
+            pending_payment_link_id: If an existing pending (unpaid) Payment
+                Link is associated with this case, pass its ID.  When present,
+                a ``payment_link_reminder`` candidate is added alongside
+                ``payment_link_recovery`` and both compete via the bandit.
 
         Returns:
             AgentDecision if a recovery action is recommended.
@@ -88,8 +98,12 @@ class AdaptiveRecoveryAgent:
         # 2. Diagnose (LLM → deterministic fallback)
         diagnosis_result = self._diagnose(context)
 
-        # 3. Generate candidate actions
-        candidates = generate_candidates(context, diagnosis_result)
+        # 3. Generate candidate actions (including reminder when pending link exists)
+        candidates = generate_candidates_with_context(
+            context,
+            diagnosis_result,
+            pending_payment_link_id=pending_payment_link_id,
+        )
 
         if not candidates:
             logger.warning(
@@ -133,6 +147,7 @@ class AdaptiveRecoveryAgent:
                 "diagnosis_source": diagnosis_result.diagnosis_source,
             },
             decision_source=DecisionSource.CONTEXTUAL_BANDIT,
+            diagnosis=diagnosis_result,
         )
 
         logger.info(

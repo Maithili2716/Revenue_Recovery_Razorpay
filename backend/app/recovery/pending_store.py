@@ -39,6 +39,12 @@ class PendingRecovery:
     amount_at_risk_minor: int
     currency: str
 
+    # Canonical context key from the agent decision.
+    # This MUST be the same context_key the bandit used when selecting
+    # the capability, so that learning updates target the correct
+    # bandit arm context.  Never reconstruct this independently.
+    context_key: str = "payment_failure|unknown|medium"
+
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )

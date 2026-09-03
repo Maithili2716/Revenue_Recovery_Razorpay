@@ -476,8 +476,11 @@ class TestPendingNoLearning:
         outcome = VerifiedOutcome(
             execution_id="exec_pending",
             case_id="case_pending",
+            capability_id="payment_link_recovery",
             status=VerificationStatus.PENDING,
             amount_recovered_minor=0,
+            amount_at_risk_minor=10000,
+            currency="INR",
             reason="Payment link is created, awaiting customer.",
         )
 

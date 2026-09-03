@@ -17,6 +17,7 @@ from app.integrations.razorpay.client import RazorpayPaymentLinkClient
 from app.policy.engine import PolicyEngine
 from app.recovery.capabilities.executor import CapabilityExecutor
 from app.recovery.capabilities.payment_link import PaymentLinkRecoveryCapability
+from app.recovery.capabilities.payment_link_reminder import PaymentLinkReminderCapability
 from app.recovery.capabilities.registry import CapabilityRegistry
 
 
@@ -27,6 +28,7 @@ def build_capability_executor() -> CapabilityExecutor:
     uses to obtain an executor.  It wires:
     - Razorpay API client (from settings)
     - PaymentLinkRecoveryCapability
+    - PaymentLinkReminderCapability
     - CapabilityRegistry
     - PolicyEngine
 
@@ -41,6 +43,7 @@ def build_capability_executor() -> CapabilityExecutor:
     # 2. Create and register capabilities.
     registry = CapabilityRegistry()
     registry.register(PaymentLinkRecoveryCapability(razorpay_client))
+    registry.register(PaymentLinkReminderCapability(razorpay_client))
 
     # 3. Create the policy engine with the registered capability IDs.
     policy_engine = PolicyEngine(
@@ -52,3 +55,4 @@ def build_capability_executor() -> CapabilityExecutor:
         registry=registry,
         policy_engine=policy_engine,
     )
+

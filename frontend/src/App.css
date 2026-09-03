@@ -217,6 +217,44 @@ button:disabled { cursor: wait; opacity: .68; }
 .page-header .eyebrow, .panel-head .eyebrow, .case-item b { color: #202020; }
 .timeline li.active .timeline-node { background: #111111; }
 
+/* Final restraint pass: tighter payment-operations surfaces, less visual noise. */
+.sidebar nav { gap: 3px; }
+.sidebar nav button { min-height: 39px; padding: 9px 13px; border-radius: 5px; font-size: 13px; }
+.sidebar nav .nav-active { color: #171717; background: #f3f2ed; }
+.sidebar nav .nav-active::before { display: block; left: 0; width: 2px; height: 16px; background: #171717; }
+.sidebar-bottom { border-color: #e8e5dd; }
+.page-header { margin-bottom: 20px; }
+.page-header h1 { margin-bottom: 9px; }
+.header-actions { padding-top: 8px; }
+.primary-button, .secondary-button, .text-button { min-height: 42px; }
+.metrics { margin-bottom: 12px; }
+.metric { min-height: 106px; padding: 17px 18px; }
+.metric p { margin-bottom: 12px; }
+.metric strong { font-size: 27px; }
+.demo-section { margin-bottom: 12px; }
+.demo-callout, .recovery-action { min-height: 164px; padding: 18px 20px; }
+.demo-callout h2, .recovery-action h2 { margin-bottom: 5px; font-size: 17px; }
+.demo-callout p:not(.eyebrow), .recovery-action p:not(.eyebrow) { margin-bottom: 9px; font-size: 11px; }
+.test-badge { top: 14px; right: 14px; }
+.timeline-panel, .cases-section { padding: 14px; }
+.timeline { margin-top: 10px; }
+.timeline li { min-height: 126px; padding: 11px 10px; }
+.timeline-copy { padding-top: 21px; }
+.timeline-empty { min-height: 0; padding: 22px 18px; }
+.timeline-empty strong { font-size: 13px; }
+.timeline-empty p { margin: 5px 0 0; }
+.cases-section { margin-top: 12px; }
+.case-item { min-height: 42px; }
+.status { padding: 3px 5px; border-radius: 3px; }
+.evaluation-header { margin-bottom: 18px; }
+.evaluation-summary, .comparison-card, .strategy-section, .evaluation-context { margin-bottom: 12px; padding: 17px 18px; }
+.evaluation-metric { min-height: 75px; padding: 11px 12px; }
+.comparison-table { margin-top: 11px; }
+.comparison-row { min-height: 38px; }
+.improvement { margin-top: 8px; padding: 11px 12px; }
+.strategy-row { min-height: 49px; padding: 8px 10px; }
+.evaluation-context { gap: 22px; }
+
 .test-mode, .test-badge { color: #16774e; }
 .test-mode i, .test-badge i { background: #16804e; }
 .test-badge { border-color: #cfe6d7; background: #f4fbf6; }

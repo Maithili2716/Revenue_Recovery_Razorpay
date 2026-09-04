@@ -186,6 +186,15 @@ button:disabled { cursor: wait; opacity: .68; }
 .timeline li.complete .timeline-node { display: grid; place-items: center; }
 .timeline li.complete .timeline-node::before { color: #fff; content: '✓'; font-size: 12px; font-weight: 800; line-height: 1; }
 .timeline li.active .timeline-node { color: transparent; }
+.timeline li.failed { border-color: #efd3cd; background: var(--red-soft); }
+.timeline li.failed .timeline-node { display: grid; place-items: center; background: var(--red); }
+.timeline li.failed .timeline-node::before { color: #fff; content: '×'; font-size: 13px; font-weight: 800; line-height: 1; }
+.timeline li.skipped { border-color: #e2e2dc; background: #faf9f5; }
+.timeline li.skipped .timeline-node { display: grid; place-items: center; color: #9ca5ae; background: #e6e6e1; }
+.timeline li.skipped .timeline-node::before { content: '—'; font-size: 12px; font-weight: 800; line-height: 1; }
+.timeline li.escalated { border-color: #ead7a8; background: var(--amber-soft); }
+.timeline li.escalated .timeline-node { display: grid; place-items: center; background: var(--amber); }
+.timeline li.escalated .timeline-node::before { color: #fff; content: '!'; font-size: 12px; font-weight: 800; line-height: 1; }
 .evaluation-header { align-items: flex-start; }
 .evaluation-header .header-actions { padding-top: 10px; }
 .evaluation-summary, .comparison-card, .strategy-section, .evaluation-context { box-shadow: none; }

@@ -392,6 +392,112 @@ class TestCreatedReturnsPending:
         assert outcome.amount_recovered_minor == 0
 
 
+class TestEscalationCancelsStaleVerification:
+    @staticmethod
+    def _record_escalation(audit: AuditService, case_id: str) -> None:
+        audit.record(
+            event_type=AuditEventType.RECOVERY_ESCALATED,
+            case_id=case_id,
+            merchant_id="merchant_evt",
+            actor="recovery_boundary",
+            data={"next_action": "merchant_follow_up"},
+        )
+
+    def test_scheduled_retry_stops_after_escalation(self):
+        from app.signals import service as signal_service
+
+        case_id = "case_retry_escalated"
+        audit = AuditService(AuditStore())
+        verification = MagicMock()
+        verification.verify.side_effect = [
+            VerifiedOutcome(
+                case_id=case_id, execution_id="exec_retry", capability_id="payment_link_recovery",
+                status=VerificationStatus.PENDING, amount_at_risk_minor=10_000,
+                amount_recovered_minor=0, currency="INR",
+            ),
+            AssertionError("stale retry must not call the provider"),
+        ]
+        execution = ExecutionResult(
+            case_id=case_id, decision_id="dec_retry", execution_id="exec_retry",
+            capability_id="payment_link_recovery", action_type="create_payment_link",
+            status=ExecutionStatus.EXECUTED, provider_reference="plink_retry",
+        )
+
+        def escalate_during_delay(_delay):
+            self._record_escalation(audit, case_id)
+
+        with patch("app.signals.service._audit_service", audit), \
+             patch("app.signals.service._verification_service", verification), \
+             patch("app.signals.service.time.sleep", side_effect=escalate_during_delay):
+            outcome = signal_service._verify_with_retries(
+                execution_result=execution, case_id=case_id, merchant_id="merchant_evt",
+                signal_id="sig_retry", decision_id="dec_retry",
+                amount_at_risk_minor=10_000, currency="INR",
+            )
+
+        assert outcome.status == VerificationStatus.UNKNOWN
+        assert outcome.amount_recovered_minor == 0
+        assert verification.verify.call_count == 1
+        assert not any(event.event_type == AuditEventType.RECOVERY_RECOVERED for event in audit.get_all())
+
+    def test_legitimate_pending_retry_continues_without_escalation(self):
+        from app.signals import service as signal_service
+
+        case_id = "case_pending_reminder_flow"
+        audit = AuditService(AuditStore())
+        verification = MagicMock()
+        verification.verify.side_effect = [
+            VerifiedOutcome(
+                case_id=case_id, execution_id="exec_pending", capability_id="payment_link_recovery",
+                status=VerificationStatus.PENDING, amount_at_risk_minor=10_000,
+                amount_recovered_minor=0, currency="INR",
+            ),
+            VerifiedOutcome(
+                case_id=case_id, execution_id="exec_pending", capability_id="payment_link_recovery",
+                status=VerificationStatus.RECOVERED, amount_at_risk_minor=10_000,
+                amount_recovered_minor=10_000, currency="INR",
+            ),
+        ]
+        execution = ExecutionResult(
+            case_id=case_id, decision_id="dec_pending", execution_id="exec_pending",
+            capability_id="payment_link_recovery", action_type="create_payment_link",
+            status=ExecutionStatus.EXECUTED, provider_reference="plink_pending",
+        )
+
+        with patch("app.signals.service._audit_service", audit), \
+             patch("app.signals.service._verification_service", verification), \
+             patch("app.signals.service.time.sleep"):
+            outcome = signal_service._verify_with_retries(
+                execution_result=execution, case_id=case_id, merchant_id="merchant_evt",
+                signal_id="sig_pending", decision_id="dec_pending",
+                amount_at_risk_minor=10_000, currency="INR",
+            )
+
+        assert outcome.status == VerificationStatus.RECOVERED
+        assert verification.verify.call_count == 2
+
+    def test_event_verification_cannot_recover_or_learn_after_escalation(self):
+        from app.signals import service as signal_service
+
+        pending = _make_pending(case_id="case_event_escalated")
+        audit = AuditService(AuditStore())
+        self._record_escalation(audit, pending.case_id)
+        verification = MagicMock(side_effect=AssertionError("provider must not be called"))
+        learning = MagicMock(side_effect=AssertionError("learning must not be called"))
+
+        with patch("app.signals.service._audit_service", audit), \
+             patch("app.signals.service._verification_service", verification), \
+             patch("app.signals.service._learning_service", learning):
+            result = signal_service._perform_independent_verification(pending, "webhook")
+
+        assert result.verification_status == "recovery_escalated"
+        assert result.amount_recovered_minor == 0
+        assert result.learning_updated is False
+        verification.verify.assert_not_called()
+        learning.record_outcome.assert_not_called()
+        assert not any(event.event_type == AuditEventType.RECOVERY_RECOVERED for event in audit.get_all())
+
+
 # ===========================================================================
 # 7. `expired/cancelled` → NOT_RECOVERED
 # ===========================================================================

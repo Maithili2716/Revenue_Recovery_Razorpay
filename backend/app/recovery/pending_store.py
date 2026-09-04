@@ -1,10 +1,11 @@
 """Pending recovery store — in-memory correlation for event-driven verification.
 
-Maps payment_link_id → recovery context so that incoming webhooks
-(e.g. payment_link.paid) can be correlated to the pending recovery case.
+Maps provider references (Payment Link ``plink_...`` or Invoice ``inv_...``)
+to recovery context so later provider events can be correlated to the pending
+recovery case.
 
 Lifecycle:
-    1. Capability execution creates a Payment Link → store pending entry
+    1. Capability execution creates a provider recovery action → store pending entry
     2. Webhook or manual verification resolves the entry
     3. Entry is marked as resolved (not deleted — audit trail safety)
 
@@ -28,7 +29,7 @@ logger = logging.getLogger(__name__)
 class PendingRecovery:
     """A recovery action awaiting verification."""
 
-    payment_link_id: str
+    payment_link_id: str | None
     case_id: str
     execution_id: str
     decision_id: str
@@ -39,11 +40,22 @@ class PendingRecovery:
     amount_at_risk_minor: int
     currency: str
 
+    # An optional, already-known provider customer reference. This is retained
+    # only to continue an existing recovery attempt; it is never inferred from
+    # a later webhook or used to look up a customer.
+    customer_id: str | None = None
+
     # Canonical context key from the agent decision.
     # This MUST be the same context_key the bandit used when selecting
     # the capability, so that learning updates target the correct
     # bandit arm context.  Never reconstruct this independently.
     context_key: str = "payment_failure|unknown|medium"
+
+    # Invoice recovery uses a real Razorpay inv_... identifier. Legacy Payment
+    # Link fields remain so existing correlation and verification stay intact.
+    invoice_id: str | None = None
+    provider_reference: str | None = None
+    provider_type: str | None = None
 
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
@@ -59,7 +71,7 @@ class PendingRecovery:
 class PendingRecoveryStore:
     """In-memory store for pending recovery correlations.
 
-    Keyed by payment_link_id (the Razorpay plink_... identifier).
+    Keyed by the provider reference returned by Razorpay.
     """
 
     def __init__(self) -> None:
@@ -67,15 +79,25 @@ class PendingRecoveryStore:
 
     def store(self, entry: PendingRecovery) -> None:
         """Store a pending recovery entry."""
-        self._store[entry.payment_link_id] = entry
+        provider_reference = (
+            entry.provider_reference or entry.invoice_id or entry.payment_link_id
+        )
+        if not provider_reference:
+            raise ValueError("Pending recovery requires a provider reference.")
+        entry.provider_reference = provider_reference
+        if entry.provider_type is None:
+            entry.provider_type = "invoice" if entry.invoice_id else "payment_link"
+        self._store[provider_reference] = entry
         logger.info(
             "pending_recovery_stored",
             extra={
-                "payment_link_id": entry.payment_link_id,
+                "provider_type": entry.provider_type,
+                "provider_reference": provider_reference,
                 "case_id": entry.case_id,
                 "execution_id": entry.execution_id,
                 "merchant_id": entry.merchant_id,
                 "amount_at_risk_minor": entry.amount_at_risk_minor,
+                "has_customer_id": entry.customer_id is not None,
             },
         )
 
@@ -84,6 +106,19 @@ class PendingRecoveryStore:
     ) -> PendingRecovery | None:
         """Look up a pending recovery by payment link ID."""
         return self._store.get(payment_link_id)
+
+    def get_by_invoice_id(self, invoice_id: str) -> PendingRecovery | None:
+        """Look up a pending recovery by its real Razorpay invoice ID."""
+        entry = self._store.get(invoice_id)
+        return (
+            entry
+            if (
+                entry is not None
+                and entry.provider_type == "invoice"
+                and entry.invoice_id == invoice_id
+            )
+            else None
+        )
 
     def get_by_case_id(self, case_id: str) -> PendingRecovery | None:
         """Look up a pending recovery by case ID."""

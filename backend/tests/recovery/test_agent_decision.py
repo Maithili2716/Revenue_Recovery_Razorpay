@@ -234,6 +234,24 @@ def test_agent_decide_produces_decision() -> None:
     assert decision.diagnosis.primary_reason == "bank_decline"
 
 
+def test_recalibrated_decision_excludes_payment_link_and_records_reason() -> None:
+    signal = _make_signal(customer_id="cust_real_test_mode")
+    case = _make_case(signal)
+    agent = AdaptiveRecoveryAgent()
+
+    decision = agent.decide(
+        signal,
+        case,
+        pending_payment_link_id="plink_existing",
+        excluded_capability_ids={"payment_link_recovery"},
+    )
+
+    assert decision is not None
+    assert decision.selected_capability_id == "invoice_recovery"
+    assert "payment_link_recovery" not in decision.candidate_action_ids
+    assert "Previously attempted capability excluded: payment_link_recovery." in decision.reason
+
+
 def test_decision_id_is_deterministic() -> None:
     assert build_decision_id("case_abc") == build_decision_id("case_abc")
 

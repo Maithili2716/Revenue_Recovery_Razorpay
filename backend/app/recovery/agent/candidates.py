@@ -7,6 +7,7 @@ generator function and registering it in CANDIDATE_GENERATORS.
 
 Current capabilities:
 - payment_link_recovery (create_payment_link)
+- invoice_recovery (create_invoice)
 - payment_link_reminder (send_payment_link_reminder) — only when an existing
   pending Payment Link is associated with the case.
 
@@ -63,10 +64,40 @@ def _payment_link_recovery(
     )
 
 
+def _invoice_recovery(
+    context: AgentContext,
+    diagnosis: Diagnosis,
+) -> CandidateAction | None:
+    """Generate an invoice-recovery candidate for a payment failure.
+
+    Razorpay is the source of truth for whether the available customer context
+    is sufficient to issue an invoice. The capability returns a bounded
+    execution failure if the provider rejects an absent customer ID.
+    """
+    if diagnosis.category != DiagnosisCategory.PAYMENT_FAILURE:
+        return None
+    if context.amount_at_risk_minor <= 0:
+        return None
+    if context.currency != "INR":
+        return None
+
+    return CandidateAction(
+        capability_id="invoice_recovery",
+        action_type=ActionType.CREATE_INVOICE,
+        priority=2,
+        rationale=(
+            "Create a Razorpay invoice for the original at-risk amount "
+            "when an invoice-based recovery action is selected."
+        ),
+        eligibility=EligibilityStatus.ELIGIBLE,
+    )
+
+
 # Registry of candidate generators.  Add new generators here to extend
 # the agent's action space.
 CANDIDATE_GENERATORS: list[CandidateGenerator] = [
     _payment_link_recovery,
+    _invoice_recovery,
 ]
 
 
@@ -215,4 +246,3 @@ def generate_candidates_with_context(
         )
 
     return candidates
-

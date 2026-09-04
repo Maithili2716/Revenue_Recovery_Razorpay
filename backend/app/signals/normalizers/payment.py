@@ -206,6 +206,28 @@ def _build_metadata(entity: dict[str, Any]) -> dict[str, Any]:
         if value is not None:
             metadata[key] = value
 
+    invoice_id = entity.get("invoice_id")
+    if (
+        isinstance(invoice_id, str)
+        and invoice_id.startswith("inv_")
+        and bool(invoice_id[4:])
+        and all(character.isalnum() or character == "_" for character in invoice_id[4:])
+    ):
+        metadata["invoice_id"] = invoice_id
+
+    # A payment attempted through a Razorpay Payment Link carries the link ID
+    # in its notes. Preserve only that bounded correlation identifier so the
+    # recovery pipeline can associate a failed recovery attempt with its
+    # existing case rather than treating it as fresh revenue at risk.
+    notes = entity.get("notes")
+    if isinstance(notes, dict):
+        payment_link_id = notes.get("payment_link_id")
+        if isinstance(payment_link_id, str) and payment_link_id:
+            metadata["payment_link_id"] = payment_link_id
+        case_id = notes.get("case_id")
+        if isinstance(case_id, str) and case_id:
+            metadata["case_id"] = case_id
+
     return metadata
 
 

@@ -73,7 +73,10 @@ def get_known_cases() -> list[_KnownCase]:
     known: list[_KnownCase] = []
     for case_id, case_event in case_events.items():
         events = audit_service.get_case_audit(case_id)
-        pending = pending_store.get_by_case_id(case_id)
+        pending = [
+            entry for entry in pending_store.get_all()
+            if entry.case_id == case_id
+        ]
         status = _recovery_status(events, pending)
         known.append(_KnownCase(
             event=case_event,
@@ -121,19 +124,25 @@ def recovery_cases_response() -> RecoveryCasesResponse:
     ])
 
 
-def _recovery_status(events: list[AuditEvent], pending: object | None) -> str:
+def _recovery_status(
+    events: list[AuditEvent],
+    pending: object | list[object] | None,
+) -> str:
     """Derive a conservative status from authoritative state already held."""
-    if pending is not None:
-        if not pending.resolved:
-            return "pending"
-        if pending.resolution_status in {"recovered", "not_recovered"}:
-            return pending.resolution_status
-
     event_types = {event.event_type for event in events}
+    if AuditEventType.RECOVERY_ESCALATED in event_types:
+        return "escalated"
     if AuditEventType.RECOVERY_RECOVERED in event_types:
         return "recovered"
     if AuditEventType.RECOVERY_NOT_RECOVERED in event_types:
         return "not_recovered"
+
+    pending_records = pending if isinstance(pending, list) else [pending] if pending is not None else []
+    if any(not record.resolved for record in pending_records):
+        return "pending"
+    for resolution_status in ("recovered", "not_recovered"):
+        if any(record.resolution_status == resolution_status for record in pending_records):
+            return resolution_status
     if AuditEventType.VERIFICATION_PENDING in event_types:
         return "pending"
     return "unknown"

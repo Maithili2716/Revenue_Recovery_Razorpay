@@ -25,6 +25,7 @@ class AuditEventType(str, Enum):
     DECISION_CREATED = "decision_created"
     POLICY_DECISION = "policy_decision"
     CAPABILITY_EXECUTED = "capability_executed"
+    VERIFICATION_SKIPPED = "verification_skipped"
     VERIFICATION_PENDING = "verification_pending"
     VERIFICATION_STARTED = "verification_started"
     VERIFICATION_COMPLETED = "verification_completed"
@@ -36,6 +37,7 @@ class AuditEventType(str, Enum):
     RECOVERY_WEBHOOK_RECEIVED = "recovery_webhook_received"
     RECOVERY_RECOVERED = "recovery_recovered"
     RECOVERY_NOT_RECOVERED = "recovery_not_recovered"
+    RECOVERY_ESCALATED = "recovery_escalated"
 
     # Reminder lifecycle
     REMINDER_SENT = "reminder_sent"

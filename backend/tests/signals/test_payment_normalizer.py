@@ -66,6 +66,8 @@ def _make_payload(
     error_step: str | None = "payment_authorization",
     error_reason: str | None = "insufficient_funds",
     method: str | None = "card",
+    invoice_id: str | None = None,
+    notes: dict | None = None,
 ) -> dict:
     """Synthetic Razorpay payment.failed payload shaped like the real one."""
     return {
@@ -89,6 +91,8 @@ def _make_payload(
                     "error_step": error_step,
                     "error_reason": error_reason,
                     "method": method,
+                    "invoice_id": invoice_id,
+                    "notes": notes,
                     "created_at": CREATED_AT_UNIX,
                 }
             }
@@ -277,6 +281,24 @@ class TestMetadata:
     def test_method_in_metadata(self) -> None:
         signal = normalize_payment_failed(_make_event(_make_payload(method="card")))
         assert signal.metadata.get("method") == "card"
+
+    def test_payment_link_id_in_notes_is_preserved_for_case_correlation(self) -> None:
+        signal = normalize_payment_failed(
+            _make_event(_make_payload(notes={"payment_link_id": "plink_recovery_001"}))
+        )
+        assert signal.metadata["payment_link_id"] == "plink_recovery_001"
+
+    def test_invoice_id_is_preserved_for_case_correlation(self) -> None:
+        signal = normalize_payment_failed(
+            _make_event(_make_payload(invoice_id="inv_test_recovery001"))
+        )
+        assert signal.metadata["invoice_id"] == "inv_test_recovery001"
+
+    def test_invalid_invoice_id_is_not_preserved(self) -> None:
+        signal = normalize_payment_failed(
+            _make_event(_make_payload(invoice_id="invoice_not_razorpay"))
+        )
+        assert "invoice_id" not in signal.metadata
 
     def test_none_values_excluded_from_metadata(self) -> None:
         signal = normalize_payment_failed(

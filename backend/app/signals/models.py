@@ -22,20 +22,20 @@ class SignalType(str, Enum):
     """The category of revenue signal."""
 
     PAYMENT_FAILURE = "payment_failure"
+    INVOICE_PAID = "invoice_paid"
 
 
 class SignalStatus(str, Enum):
     """The lifecycle status of the signal."""
 
     FAILED = "failed"
+    PAID = "paid"
 
 
 class RevenueSignal(BaseModel):
     """Canonical, provider-agnostic representation of a revenue signal.
 
-    Fields are kept minimal for the current block (payment.failed only).
-    Subscription / invoice normalization will add fields in the corresponding
-    block rather than speculatively here.
+    Fields are kept minimal for payment failure and invoice paid events.
     """
 
     # --- Our internal identifiers ---

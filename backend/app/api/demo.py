@@ -279,7 +279,17 @@ def _policy_snapshot(events: list[AuditEvent]) -> PolicySnapshot | None:
 
 
 def _execution_snapshot(events: list[AuditEvent]) -> ExecutionSnapshot | None:
-    event = _latest(events, AuditEventType.CAPABILITY_EXECUTED)
+    event = next(
+        (
+            item
+            for item in reversed(events)
+            if item.event_type == AuditEventType.CAPABILITY_EXECUTED
+            and (
+                _str_or_none(item.data.get("capability_id")) or item.actor
+            ) != "payment_link_reminder"
+        ),
+        None,
+    )
     if event is None:
         return None
     data = event.data

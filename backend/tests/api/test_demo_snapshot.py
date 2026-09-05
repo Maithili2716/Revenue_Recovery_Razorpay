@@ -93,6 +93,23 @@ def test_snapshot_exposes_available_diagnosis_decision_policy_and_execution(clie
     assert payload["verification"] is None  # Execution is never represented as recovery.
 
 
+def test_reminder_does_not_replace_payment_link_recovery_execution(demo_state) -> None:
+    sessions, audit = demo_state
+    sessions.store(_session(signal=_signal(), case_id="case_snapshot"))
+    _case_created(audit)
+    audit.record(event_type=AuditEventType.CAPABILITY_EXECUTED, case_id="case_snapshot", merchant_id="merchant_snapshot", actor="payment_link_recovery", execution_id="exec_snapshot", data={"status": "executed", "capability_id": "payment_link_recovery", "provider": "razorpay", "provider_reference": "plink_snapshot", "payment_link_url": "https://rzp.io/i/snapshot"})
+    audit.record(event_type=AuditEventType.CAPABILITY_EXECUTED, case_id="case_snapshot", merchant_id="merchant_snapshot", actor="payment_link_reminder", execution_id="exec_reminder", data={"status": "executed", "capability_id": "payment_link_reminder", "provider": "razorpay", "provider_reference": "plink_snapshot"})
+    audit.record(event_type=AuditEventType.REMINDER_SENT, case_id="case_snapshot", merchant_id="merchant_snapshot", actor="payment_link_reminder_capability", execution_id="exec_reminder", data={"status": "executed", "capability_id": "payment_link_reminder", "payment_link_id": "plink_snapshot", "medium": "email"})
+
+    payload = demo.get_demo_status("demo_snapshot").model_dump(mode="json")
+
+    assert payload["execution"]["capability_id"] == "payment_link_recovery"
+    assert payload["execution"]["payment_link_url"] == "https://rzp.io/i/snapshot"
+    assert payload["reminder"] == {
+        "status": "executed", "payment_link_id": "plink_snapshot", "medium": "email",
+    }
+
+
 def test_snapshot_exposes_actual_invoice_execution_details(client: TestClient, demo_state) -> None:
     sessions, audit = demo_state
     sessions.store(_session(signal=_signal(), case_id="case_snapshot"))

@@ -35,7 +35,9 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from threading import Lock
+from typing import Any, Callable
 
 from app.config import settings
 from app.demo.store import get_demo_session_store
@@ -76,6 +78,8 @@ _REVERIFY_MAX_ATTEMPTS = 3
 # Delay (seconds) between re-verification attempts (simple linear backoff).
 _REVERIFY_DELAYS = [10, 30, 60]
 
+_CASE4_REMINDER_DELAY_SECONDS = 90
+
 # A failed provider/capability execution may be recalibrated once.  This is
 # intentionally bounded so a failing provider cannot cause an infinite loop.
 _MAX_CAPABILITY_ATTEMPTS = 2
@@ -113,6 +117,8 @@ _verification_service = VerificationService(provider=_verification_provider)
 
 # Pending recovery store — correlates payment_link_id → recovery context.
 _pending_store = PendingRecoveryStore()
+_case4_reminder_lock = Lock()
+_case4_reminder_tasks: set[asyncio.Task[None]] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +167,10 @@ class SignalIngestionResult:
 # ---------------------------------------------------------------------------
 
 
-def ingest_webhook_event(event: RazorpayWebhookEvent) -> SignalIngestionResult:
+def ingest_webhook_event(
+    event: RazorpayWebhookEvent,
+    payment_link_pending_callback: Callable[[PendingRecovery], None] | None = None,
+) -> SignalIngestionResult:
     """Normalize a verified RazorpayWebhookEvent into a RevenueSignal.
 
     Returns a SignalIngestionResult describing what happened.  Never raises
@@ -190,7 +199,10 @@ def ingest_webhook_event(event: RazorpayWebhookEvent) -> SignalIngestionResult:
             order_id=_extract_payment_order_id(event.payload),
             signal=signal,
         )
-        _run_pipeline(signal)
+        _run_pipeline(
+            signal,
+            payment_link_pending_callback=payment_link_pending_callback,
+        )
     elif signal.signal_type == SignalType.INVOICE_PAID:
         logger.info(
             "invoice_paid_signal_recorded",
@@ -218,7 +230,81 @@ async def ingest_webhook_event_background(event: RazorpayWebhookEvent) -> None:
     """
     try:
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, ingest_webhook_event, event)
+
+        def schedule_case4_reminder(pending: PendingRecovery) -> None:
+            due_at = pending.created_at + timedelta(
+                seconds=_CASE4_REMINDER_DELAY_SECONDS
+            )
+
+            def create_reminder_task() -> None:
+                task = asyncio.create_task(
+                    _run_case4_reminder_at_due_time(
+                        case_id=pending.case_id,
+                        payment_link_id=pending.payment_link_id,
+                        due_at=due_at,
+                    )
+                )
+                _case4_reminder_tasks.add(task)
+
+                def reminder_task_done(completed_task: asyncio.Task[None]) -> None:
+                    _case4_reminder_tasks.discard(completed_task)
+                    if completed_task.cancelled():
+                        logger.warning(
+                            "case4_reminder_task_cancelled",
+                            extra={
+                                "case_id": pending.case_id,
+                                "payment_link_id": pending.payment_link_id,
+                            },
+                        )
+                        return
+                    error = completed_task.exception()
+                    if error is not None:
+                        logger.error(
+                            "case4_reminder_task_failed",
+                            exc_info=(type(error), error, error.__traceback__),
+                            extra={
+                                "case_id": pending.case_id,
+                                "payment_link_id": pending.payment_link_id,
+                            },
+                        )
+                        return
+                    logger.info(
+                        "case4_reminder_task_completed",
+                        extra={
+                            "case_id": pending.case_id,
+                            "payment_link_id": pending.payment_link_id,
+                        },
+                    )
+
+                task.add_done_callback(reminder_task_done)
+                logger.info(
+                    "case4_reminder_task_created",
+                    extra={
+                        "case_id": pending.case_id,
+                        "payment_link_id": pending.payment_link_id,
+                        "due_at": due_at.isoformat(),
+                    },
+                )
+
+            try:
+                loop.call_soon_threadsafe(create_reminder_task)
+            except RuntimeError:
+                logger.exception(
+                    "case4_reminder_skipped",
+                    extra={
+                        "case_id": pending.case_id,
+                        "payment_link_id": pending.payment_link_id,
+                        "reason": "event_loop_unavailable",
+                    },
+                )
+                return
+
+        await loop.run_in_executor(
+            None,
+            ingest_webhook_event,
+            event,
+            schedule_case4_reminder,
+        )
     except Exception:
         logger.exception(
             "background_ingestion_failed",
@@ -227,6 +313,268 @@ async def ingest_webhook_event_background(event: RazorpayWebhookEvent) -> None:
                 "event_id": event.event_id,
             },
         )
+
+
+async def _run_case4_reminder_at_due_time(
+    *,
+    case_id: str,
+    payment_link_id: str | None,
+    due_at: datetime,
+) -> None:
+    """Run one reminder evaluation at the pending recovery's due time."""
+    logger.info(
+        "case4_reminder_task_started",
+        extra={"case_id": case_id, "payment_link_id": payment_link_id},
+    )
+    try:
+        while True:
+            remaining_seconds = (due_at - datetime.now(timezone.utc)).total_seconds()
+            if remaining_seconds <= 0:
+                break
+            logger.info(
+                "case4_reminder_task_sleeping",
+                extra={
+                    "case_id": case_id,
+                    "payment_link_id": payment_link_id,
+                    "due_at": due_at.isoformat(),
+                    "remaining_seconds": remaining_seconds,
+                },
+            )
+            await asyncio.sleep(remaining_seconds)
+
+        logger.info(
+            "case4_reminder_task_woke",
+            extra={"case_id": case_id, "payment_link_id": payment_link_id},
+        )
+        loop = asyncio.get_running_loop()
+        logger.info(
+            "case4_reminder_evaluation_submitted",
+            extra={"case_id": case_id, "payment_link_id": payment_link_id},
+        )
+        await loop.run_in_executor(
+            None,
+            _evaluate_and_execute_case4_reminder,
+            case_id,
+            payment_link_id,
+        )
+    except asyncio.CancelledError:
+        logger.warning(
+            "case4_reminder_task_cancellation_observed",
+            extra={"case_id": case_id, "payment_link_id": payment_link_id},
+        )
+        raise
+    except Exception:
+        logger.exception(
+            "case4_reminder_task_exception_observed",
+            extra={"case_id": case_id, "payment_link_id": payment_link_id},
+        )
+        raise
+
+
+def _evaluate_and_execute_case4_reminder(
+    case_id: str,
+    payment_link_id: str | None,
+) -> None:
+    """Re-read and conditionally remind one existing Payment Link recovery."""
+    with _case4_reminder_lock:
+        logger.info(
+            "case4_reminder_eligibility_check",
+            extra={
+                "case_id": case_id,
+                "payment_link_id": payment_link_id,
+            },
+        )
+        if not payment_link_id:
+            _log_case4_reminder_skip(case_id, payment_link_id, "invalid_provider_reference")
+            return
+
+        pending = _pending_store.get_by_payment_link_id(payment_link_id)
+        if pending is None or pending.case_id != case_id:
+            _log_case4_reminder_skip(case_id, payment_link_id, "pending_missing")
+            return
+        if (
+            pending.provider_type != "payment_link"
+            or pending.capability_id != "payment_link_recovery"
+            or not pending.provider_reference
+            or pending.provider_reference != payment_link_id
+        ):
+            _log_case4_reminder_skip(case_id, payment_link_id, "invalid_provider_reference")
+            return
+        if pending.resolved:
+            _log_case4_reminder_skip(case_id, payment_link_id, "already_resolved")
+            return
+
+        due_at = pending.created_at + timedelta(seconds=_CASE4_REMINDER_DELAY_SECONDS)
+        if datetime.now(timezone.utc) < due_at:
+            _log_case4_reminder_skip(case_id, payment_link_id, "not_due")
+            return
+
+        events = _audit_service.get_case_audit(case_id)
+        event_types = {event.event_type for event in events}
+        if AuditEventType.RECOVERY_RECOVERED in event_types:
+            _log_case4_reminder_skip(case_id, payment_link_id, "recovered")
+            return
+        if AuditEventType.RECOVERY_NOT_RECOVERED in event_types:
+            _log_case4_reminder_skip(case_id, payment_link_id, "not_recovered")
+            return
+        if AuditEventType.RECOVERY_ESCALATED in event_types:
+            _log_case4_reminder_skip(case_id, payment_link_id, "escalated")
+            return
+        if any(
+            event.event_type == AuditEventType.CAPABILITY_EXECUTED
+            and event.data.get("capability_id") == "invoice_recovery"
+            for event in events
+        ):
+            _log_case4_reminder_skip(case_id, payment_link_id, "invoice_attempted")
+            return
+        if any(
+            event.event_type == AuditEventType.REMINDER_SENT
+            and event.data.get("payment_link_id") == payment_link_id
+            for event in events
+        ):
+            _log_case4_reminder_skip(case_id, payment_link_id, "reminder_already_sent")
+            return
+
+        latest_verification = next(
+            (
+                event
+                for event in reversed(events)
+                if event.event_type in {
+                    AuditEventType.VERIFICATION_PENDING,
+                    AuditEventType.VERIFICATION_COMPLETED,
+                }
+            ),
+            None,
+        )
+        if (
+            latest_verification is None
+            or latest_verification.data.get("verification_status") != "pending"
+        ):
+            _log_case4_reminder_skip(case_id, payment_link_id, "verification_not_pending")
+            return
+
+        case = _case_from_pending_recovery(pending)
+        if case is None:
+            _log_case4_reminder_skip(case_id, payment_link_id, "case_reconstruction_failed")
+            return
+
+        decision = AgentDecision(
+            decision_id=f"reminder_{case.case_id}",
+            case_id=case.case_id,
+            selected_capability_id="payment_link_reminder",
+            selected_action_type=ActionType.SEND_PAYMENT_LINK_REMINDER,
+            reason="Existing Payment Link remains pending after the Case 4 wait.",
+            candidate_action_ids=["payment_link_reminder"],
+            decision_context={
+                "payment_link_id": payment_link_id,
+                "medium": "email",
+            },
+            decision_source=DecisionSource.DETERMINISTIC_FALLBACK,
+        )
+        _audit_service.record(
+            event_type=AuditEventType.DECISION_CREATED,
+            case_id=case.case_id,
+            merchant_id=case.merchant_id,
+            actor="case4_reminder_scheduler",
+            signal_id=case.signal_id,
+            decision_id=decision.decision_id,
+            data={
+                "selected_capability_id": decision.selected_capability_id,
+                "selected_action_type": decision.selected_action_type.value,
+                "candidate_action_ids": decision.candidate_action_ids,
+                "decision_source": decision.decision_source.value,
+                "reason": decision.reason,
+            },
+        )
+        logger.info(
+            "case4_reminder_execution_started",
+            extra={
+                "case_id": case.case_id,
+                "payment_link_id": payment_link_id,
+                "capability_id": decision.selected_capability_id,
+            },
+        )
+        execution = _executor.execute(decision, case)
+        _audit_service.record(
+            event_type=AuditEventType.POLICY_DECISION,
+            case_id=case.case_id,
+            merchant_id=case.merchant_id,
+            actor="policy_engine",
+            signal_id=case.signal_id,
+            decision_id=decision.decision_id,
+            execution_id=execution.execution_id,
+            data={
+                "execution_status": execution.status.value,
+                "capability_id": execution.capability_id,
+                "verdict": (
+                    execution.policy_decision.verdict.value
+                    if execution.policy_decision is not None
+                    else None
+                ),
+                "reasons": (
+                    execution.policy_decision.reasons
+                    if execution.policy_decision is not None
+                    else []
+                ),
+            },
+        )
+        _audit_service.record(
+            event_type=AuditEventType.CAPABILITY_EXECUTED,
+            case_id=case.case_id,
+            merchant_id=case.merchant_id,
+            actor=execution.capability_id,
+            signal_id=case.signal_id,
+            decision_id=decision.decision_id,
+            execution_id=execution.execution_id,
+            data={
+                "capability_id": execution.capability_id,
+                "status": execution.status.value,
+                "provider": execution.provider,
+                "provider_reference": execution.provider_reference,
+                "error_message": execution.error_message,
+            },
+        )
+        _audit_service.record(
+            event_type=AuditEventType.REMINDER_SENT,
+            case_id=case.case_id,
+            merchant_id=case.merchant_id,
+            actor="payment_link_reminder_capability",
+            signal_id=case.signal_id,
+            decision_id=decision.decision_id,
+            execution_id=execution.execution_id,
+            data={
+                "capability_id": execution.capability_id,
+                "payment_link_id": payment_link_id,
+                "medium": execution.metadata.get("medium", "email"),
+                "status": execution.status.value,
+                "error_message": execution.error_message,
+            },
+        )
+        logger.info(
+            "case4_reminder_execution_result",
+            extra={
+                "case_id": case.case_id,
+                "payment_link_id": payment_link_id,
+                "execution_status": execution.status.value,
+                "success": execution.status == ExecutionStatus.EXECUTED,
+                "event_type": AuditEventType.REMINDER_SENT.value,
+            },
+        )
+
+
+def _log_case4_reminder_skip(
+    case_id: str,
+    payment_link_id: str | None,
+    reason: str,
+) -> None:
+    logger.info(
+        "case4_reminder_skipped",
+        extra={
+            "case_id": case_id,
+            "payment_link_id": payment_link_id,
+            "reason": reason,
+        },
+    )
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -752,7 +1100,10 @@ def _attempted_capability_ids(case_id: str) -> set[str]:
     return attempted
 
 
-def _run_pipeline(signal: RevenueSignal) -> RecoveryPipelineResult | None:
+def _run_pipeline(
+    signal: RevenueSignal,
+    payment_link_pending_callback: Callable[[PendingRecovery], None] | None = None,
+) -> RecoveryPipelineResult | None:
     """Run the full detection → decision → execution → verification → learning pipeline.
 
     Flow:
@@ -1207,6 +1558,22 @@ def _run_pipeline(signal: RevenueSignal) -> RecoveryPipelineResult | None:
             provider_type=pending_provider_type,
         )
         _pending_store.store(pending)
+        if (
+            pending_provider_type == "payment_link"
+            and execution_result.capability_id == "payment_link_recovery"
+            and payment_link_pending_callback is not None
+        ):
+            try:
+                payment_link_pending_callback(pending)
+            except Exception:
+                logger.exception(
+                    "case4_reminder_skipped",
+                    extra={
+                        "case_id": pending.case_id,
+                        "payment_link_id": pending.payment_link_id,
+                        "reason": "scheduling_callback_failed",
+                    },
+                )
 
         awaiting = (
             "invoice.paid webhook"

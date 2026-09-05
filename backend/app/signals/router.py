@@ -16,13 +16,16 @@ from __future__ import annotations
 
 from app.integrations.razorpay.events import RazorpayWebhookEvent
 from app.signals.models import RevenueSignal
+from app.signals.normalizers.invoice import normalize_invoice_paid
 from app.signals.normalizers.payment import (
     UnsupportedEventType as PaymentUnsupportedEventType,
     normalize_payment_failed,
 )
 
 # Event types handled by signal normalizers.
-_SUPPORTED_SIGNAL_EVENT_TYPES: frozenset[str] = frozenset({"payment.failed"})
+_SUPPORTED_SIGNAL_EVENT_TYPES: frozenset[str] = frozenset(
+    {"payment.failed", "invoice.paid"}
+)
 
 # Event types that are recovery-related (not signals — routed to verification).
 RECOVERY_EVENT_TYPES: frozenset[str] = frozenset({
@@ -68,9 +71,10 @@ def route_webhook_to_signal(event: RazorpayWebhookEvent) -> RevenueSignal:
 
     if event_type == "payment.failed":
         return normalize_payment_failed(event)
+    if event_type == "invoice.paid":
+        return normalize_invoice_paid(event)
 
     raise UnsupportedEventType(
         f"No normalizer registered for event type '{event_type}'. "
         f"Supported types: {sorted(_SUPPORTED_SIGNAL_EVENT_TYPES)}"
     )
-

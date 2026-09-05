@@ -31,6 +31,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _PAYMENT_LINKS_URL = "https://api.razorpay.com/v1/payment_links/"
+_INVOICES_URL = "https://api.razorpay.com/v1/invoices/"
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,22 @@ class PaymentLinkVerificationResponse:
     http_status_code: int | None = None
 
 
+@dataclass(frozen=True)
+class InvoiceVerificationResponse:
+    """Structured response from fetching a Razorpay invoice."""
+
+    success: bool
+    invoice_id: str | None = None
+    status: str | None = None
+    amount: int | None = None
+    amount_paid: int | None = None
+    amount_due: int | None = None
+    currency: str | None = None
+    payment_id: str | None = None
+    error_message: str | None = None
+    http_status_code: int | None = None
+
+
 class VerificationProvider(ABC):
     """Abstract verification provider interface.
 
@@ -61,6 +78,10 @@ class VerificationProvider(ABC):
     ) -> PaymentLinkVerificationResponse:
         """Fetch the current state of a payment link from the provider."""
         ...
+
+    def fetch_invoice(self, invoice_id: str) -> InvoiceVerificationResponse:
+        """Fetch an invoice when the provider supports invoice verification."""
+        raise NotImplementedError("Invoice verification is not supported by this provider.")
 
 
 class RazorpayVerificationProvider(VerificationProvider):
@@ -162,4 +183,71 @@ class RazorpayVerificationProvider(VerificationProvider):
             return PaymentLinkVerificationResponse(
                 success=False,
                 error_message=f"Unexpected error: {exc}",
+            )
+
+    def fetch_invoice(self, invoice_id: str) -> InvoiceVerificationResponse:
+        """Fetch invoice status from Razorpay's Invoice API."""
+        url = f"{_INVOICES_URL}{invoice_id}"
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.get(url, auth=self._auth)
+
+            if response.status_code == 200:
+                data = response.json()
+                if not isinstance(data, dict):
+                    return InvoiceVerificationResponse(
+                        success=False,
+                        error_message="Razorpay invoice API returned an invalid response.",
+                        http_status_code=response.status_code,
+                    )
+                return InvoiceVerificationResponse(
+                    success=True,
+                    invoice_id=data.get("id") if isinstance(data.get("id"), str) else None,
+                    status=data.get("status") if isinstance(data.get("status"), str) else None,
+                    amount=data.get("amount") if isinstance(data.get("amount"), int) else None,
+                    amount_paid=(
+                        data.get("amount_paid")
+                        if isinstance(data.get("amount_paid"), int)
+                        else None
+                    ),
+                    amount_due=(
+                        data.get("amount_due")
+                        if isinstance(data.get("amount_due"), int)
+                        else None
+                    ),
+                    currency=data.get("currency") if isinstance(data.get("currency"), str) else None,
+                    payment_id=(
+                        data.get("payment_id")
+                        if isinstance(data.get("payment_id"), str)
+                        else None
+                    ),
+                    http_status_code=response.status_code,
+                )
+
+            logger.warning(
+                "razorpay_invoice_verification_api_error",
+                extra={"invoice_id": invoice_id, "http_status": response.status_code},
+            )
+            return InvoiceVerificationResponse(
+                success=False,
+                error_message="Razorpay invoice verification API error.",
+                http_status_code=response.status_code,
+            )
+        except httpx.TimeoutException:
+            logger.error("razorpay_invoice_verification_timeout", extra={"invoice_id": invoice_id})
+            return InvoiceVerificationResponse(
+                success=False,
+                error_message="Razorpay invoice verification request timed out.",
+            )
+        except httpx.HTTPError:
+            logger.error("razorpay_invoice_verification_http_error", extra={"invoice_id": invoice_id})
+            return InvoiceVerificationResponse(
+                success=False,
+                error_message="Razorpay invoice verification HTTP error.",
+            )
+        except Exception:
+            logger.exception("razorpay_invoice_verification_unexpected_error", extra={"invoice_id": invoice_id})
+            return InvoiceVerificationResponse(
+                success=False,
+                error_message="Unexpected Razorpay invoice verification error.",
             )

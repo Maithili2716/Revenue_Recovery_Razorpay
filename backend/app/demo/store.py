@@ -19,6 +19,7 @@ class DemoSession:
     status: str = "payment_ready"
     case_id: str | None = None
     signal: RevenueSignal | None = None
+    demo_customer_id: str | None = None
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -40,16 +41,23 @@ class DemoSessionStore:
 
     def link_payment_failure(
         self, *, order_id: str | None, signal: RevenueSignal
-    ) -> None:
+    ) -> RevenueSignal:
         """Associate a normalized payment.failed signal with its demo order."""
         if not order_id:
-            return
+            return signal
         demo_id = self._demo_id_by_order_id.get(order_id)
         if demo_id is None:
-            return
+            return signal
         session = self._by_demo_id[demo_id]
+        if session.demo_customer_id:
+            # This is a demo-session-only handoff of explicitly configured
+            # Test Mode data; the normal payment signal normalizer remains PII-free.
+            signal = signal.model_copy(
+                update={"customer_id": session.demo_customer_id}
+            )
         session.signal = signal
         session.status = "payment_failed"
+        return signal
 
     def link_recovery_case(self, *, signal_id: str, case_id: str) -> None:
         """Associate the detector-produced case with its already-linked signal."""

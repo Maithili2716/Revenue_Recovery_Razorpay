@@ -26,7 +26,7 @@ class RecoveryPipelineResult(BaseModel):
     capability_id: str
 
     execution_status: ExecutionStatus
-    verification_status: VerificationStatus
+    verification_status: VerificationStatus | None = None
 
     amount_at_risk_minor: int
     amount_recovered_minor: int = 0

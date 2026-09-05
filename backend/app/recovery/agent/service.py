@@ -77,6 +77,7 @@ class AdaptiveRecoveryAgent:
         recovery_case: RecoveryCase,
         *,
         pending_payment_link_id: str | None = None,
+        excluded_capability_ids: set[str] | None = None,
     ) -> AgentDecision | None:
         """Run the full agent decision pipeline.
 
@@ -87,6 +88,8 @@ class AdaptiveRecoveryAgent:
                 Link is associated with this case, pass its ID.  When present,
                 a ``payment_link_reminder`` candidate is added alongside
                 ``payment_link_recovery`` and both compete via the bandit.
+            excluded_capability_ids: Existing capability IDs that must not be
+                selected for a recalibration attempt.
 
         Returns:
             AgentDecision if a recovery action is recommended.
@@ -104,6 +107,12 @@ class AdaptiveRecoveryAgent:
             diagnosis_result,
             pending_payment_link_id=pending_payment_link_id,
         )
+        if excluded_capability_ids:
+            candidates = [
+                candidate
+                for candidate in candidates
+                if candidate.capability_id not in excluded_capability_ids
+            ]
 
         if not candidates:
             logger.warning(
@@ -125,13 +134,23 @@ class AdaptiveRecoveryAgent:
             )
             return None
 
-        # 5. Produce AgentDecision
+        # 5. Produce AgentDecision. The bounded exclusion is supplied only by
+        # pipeline recalibration after a real prior recovery attempt; preserve
+        # it in the existing decision reason so the audit trail explains why a
+        # previously attempted capability was not selected again.
+        decision_reason = selection.selection_reason
+        if excluded_capability_ids:
+            excluded = ", ".join(sorted(excluded_capability_ids))
+            decision_reason = (
+                f"{decision_reason} Previously attempted capability excluded: "
+                f"{excluded}."
+            )
         decision = AgentDecision(
             decision_id=build_decision_id(recovery_case.case_id),
             case_id=recovery_case.case_id,
             selected_capability_id=selection.selected.capability_id,
             selected_action_type=selection.selected.action_type,
-            reason=selection.selection_reason,
+            reason=decision_reason,
             candidate_action_ids=[c.capability_id for c in candidates],
             decision_context={
                 "signal_type": context.signal_type,

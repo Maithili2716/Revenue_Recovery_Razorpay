@@ -1,6 +1,7 @@
 """Focused regression tests for bounded diagnosis and policy observability."""
 
 from datetime import datetime, timezone
+from unittest.mock import Mock
 
 from app.policy.models import PolicyDecision, PolicyVerdict
 from app.recovery.agent.models import (
@@ -16,7 +17,6 @@ from app.recovery.audit.service import AuditService
 from app.recovery.audit.store import AuditStore
 from app.recovery.capabilities.models import ExecutionResult, ExecutionStatus
 from app.recovery.models import Recoverability, RecoveryCase, RiskStatus, Urgency
-from app.recovery.verification.models import VerificationStatus, VerifiedOutcome
 from app.signals import service as signal_service
 from app.signals.models import RevenueSignal, SignalStatus, SignalType
 
@@ -32,7 +32,7 @@ def _signal() -> RevenueSignal:
     )
 
 
-def test_pipeline_audits_existing_diagnosis_and_policy_once(monkeypatch) -> None:
+def test_failed_execution_skips_verification_and_learning(monkeypatch) -> None:
     audit = AuditService(AuditStore())
     diagnosis = Diagnosis(
         category=DiagnosisCategory.PAYMENT_FAILURE, primary_reason="bank_decline",
@@ -66,16 +66,16 @@ def test_pipeline_audits_existing_diagnosis_and_policy_once(monkeypatch) -> None
                 policy_decision=policy, error_message="Simulated capability failure.",
             )
 
-    outcome = VerifiedOutcome(
-        case_id="case_unused", execution_id="exec_observe", capability_id="payment_link_recovery",
-        status=VerificationStatus.UNKNOWN, amount_at_risk_minor=10_000, currency="INR",
-    )
+    verify = Mock(side_effect=AssertionError("verification must not run after execution failure"))
+    learning = Mock()
+    learning.record_outcome.side_effect = AssertionError("learning must not run after execution failure")
     monkeypatch.setattr(signal_service, "_audit_service", audit)
     monkeypatch.setattr(signal_service, "_agent", Agent())
     monkeypatch.setattr(signal_service, "_executor", Executor())
-    monkeypatch.setattr(signal_service, "_verify_with_retries", lambda **_: outcome)
+    monkeypatch.setattr(signal_service, "_verify_with_retries", verify)
+    monkeypatch.setattr(signal_service, "_learning_service", learning)
 
-    signal_service._run_pipeline(_signal())
+    result = signal_service._run_pipeline(_signal())
 
     events = audit.get_all()
     diagnosis_event = next(event for event in events if event.event_type == AuditEventType.DIAGNOSIS_CREATED)
@@ -88,3 +88,16 @@ def test_pipeline_audits_existing_diagnosis_and_policy_once(monkeypatch) -> None
     assert policy_event.data["verdict"] == "allow"
     assert policy_event.data["reasons"] == ["All policy checks passed."]
     assert sum(event.event_type == AuditEventType.DIAGNOSIS_CREATED for event in events) == 1
+    execution_event = next(event for event in events if event.event_type == AuditEventType.CAPABILITY_EXECUTED)
+    assert execution_event.data["status"] == "failed"
+    assert execution_event.data["error_message"] == "Simulated capability failure."
+    assert any(event.event_type == AuditEventType.VERIFICATION_SKIPPED for event in events)
+    assert any(event.event_type == AuditEventType.LEARNING_SKIPPED for event in events)
+    assert not any(event.event_type in {AuditEventType.VERIFICATION_PENDING, AuditEventType.VERIFICATION_COMPLETED} for event in events)
+    verify.assert_not_called()
+    learning.record_outcome.assert_not_called()
+    assert result is not None
+    assert result.execution_status == ExecutionStatus.FAILED
+    assert result.verification_status is None
+    assert result.learning_updated is False
+    assert result.verification_reason == "Simulated capability failure."

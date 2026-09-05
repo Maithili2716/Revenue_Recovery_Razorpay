@@ -70,6 +70,37 @@ def test_dashboard_summary_uses_known_case_and_pending_state(client: TestClient,
     assert response.json()["recovered_minor"] == 0
 
 
+def test_recovery_status_distinguishes_escalated_from_genuinely_pending(dashboard_state) -> None:
+    audit, pending = dashboard_state
+    now = datetime.now(timezone.utc)
+    _record_case(audit, case_id="case_escalated", amount=10_000, created_at=now)
+    _record_case(audit, case_id="case_pending", amount=10_000, created_at=now - timedelta(seconds=1))
+    for case_id, payment_link_id in (
+        ("case_escalated", "plink_escalated"),
+        ("case_pending", "plink_pending"),
+    ):
+        pending.store(PendingRecovery(
+            payment_link_id=payment_link_id, case_id=case_id, execution_id=f"exec_{case_id}",
+            decision_id=f"dec_{case_id}", merchant_id="merchant_dashboard",
+            capability_id="payment_link_recovery", signal_id=f"signal_{case_id}",
+            amount_at_risk_minor=10_000, currency="INR",
+        ))
+    audit.record(
+        event_type=AuditEventType.RECOVERY_ESCALATED,
+        case_id="case_escalated", merchant_id="merchant_dashboard",
+        actor="recovery_boundary", data={"next_action": "merchant_follow_up"},
+    )
+
+    assert dashboard._recovery_status(
+        audit.get_case_audit("case_escalated"),
+        pending.get_by_case_id("case_escalated"),
+    ) == "escalated"
+    assert dashboard._recovery_status(
+        audit.get_case_audit("case_pending"),
+        pending.get_by_case_id("case_pending"),
+    ) == "pending"
+
+
 def test_dashboard_summary_counts_only_verified_recovery_and_calculates_rate(client: TestClient, dashboard_state) -> None:
     audit, _ = dashboard_state
     now = datetime.now(timezone.utc)

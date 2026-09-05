@@ -117,7 +117,9 @@ class Diagnosis(BaseModel):
 
 class ActionType(str, Enum):
     CREATE_PAYMENT_LINK = "create_payment_link"
+    CREATE_INVOICE = "create_invoice"
     SEND_PAYMENT_LINK_REMINDER = "send_payment_link_reminder"
+    ESCALATE_RECOVERY = "escalate_recovery"
 
 
 class EligibilityStatus(str, Enum):
@@ -156,6 +158,7 @@ class DecisionSource(str, Enum):
 
     CONTEXTUAL_BANDIT = "contextual_bandit"
     DETERMINISTIC_FALLBACK = "deterministic_fallback"
+    SYSTEM_BOUNDARY = "system_boundary"
 
 
 def build_decision_id(case_id: str) -> str:

@@ -23,6 +23,7 @@ import logging
 from app.recovery.capabilities.models import ExecutionResult, ExecutionStatus
 from app.recovery.verification.models import VerificationStatus, VerifiedOutcome
 from app.recovery.verification.razorpay import (
+    InvoiceVerificationResponse,
     PaymentLinkVerificationResponse,
     VerificationProvider,
 )
@@ -93,18 +94,36 @@ class VerificationService:
             },
         )
 
-        # Fetch from provider.
-        response = self._provider.fetch_payment_link(
-            execution_result.provider_reference
+        provider_type = execution_result.metadata.get(
+            "provider_type", "payment_link"
         )
-
-        # Interpret the response.
-        outcome = self._interpret(
-            execution_result=execution_result,
-            response=response,
-            amount_at_risk_minor=amount_at_risk_minor,
-            currency=currency,
-        )
+        if provider_type == "invoice":
+            try:
+                response = self._provider.fetch_invoice(
+                    execution_result.provider_reference
+                )
+            except NotImplementedError:
+                response = InvoiceVerificationResponse(
+                    success=False,
+                    error_message="Invoice verification is not supported by this provider.",
+                )
+            outcome = self._interpret_invoice(
+                execution_result=execution_result,
+                response=response,
+                amount_at_risk_minor=amount_at_risk_minor,
+                currency=currency,
+            )
+        else:
+            # Preserve the established Payment Link verification path.
+            response = self._provider.fetch_payment_link(
+                execution_result.provider_reference
+            )
+            outcome = self._interpret(
+                execution_result=execution_result,
+                response=response,
+                amount_at_risk_minor=amount_at_risk_minor,
+                currency=currency,
+            )
 
         logger.info(
             "verification_completed",
@@ -120,6 +139,71 @@ class VerificationService:
         )
 
         return outcome
+
+    def _interpret_invoice(
+        self,
+        *,
+        execution_result: ExecutionResult,
+        response: InvoiceVerificationResponse,
+        amount_at_risk_minor: int,
+        currency: str,
+    ) -> VerifiedOutcome:
+        """Interpret a bounded Razorpay Invoice API response."""
+        base_kwargs = dict(
+            case_id=execution_result.case_id,
+            execution_id=execution_result.execution_id,
+            capability_id=execution_result.capability_id,
+            provider=execution_result.provider,
+            provider_reference=execution_result.provider_reference,
+            amount_at_risk_minor=amount_at_risk_minor,
+            currency=currency,
+            verification_source="razorpay_invoice_api",
+        )
+        if not response.success:
+            return VerifiedOutcome(
+                **base_kwargs,
+                status=VerificationStatus.UNKNOWN,
+                amount_recovered_minor=0,
+                reason=f"Provider API error: {response.error_message}",
+                evidence={"http_status_code": response.http_status_code},
+            )
+
+        status = (response.status or "").lower()
+        evidence = {
+            "invoice_status": response.status,
+            "amount": response.amount,
+            "amount_paid": response.amount_paid,
+            "amount_due": response.amount_due,
+        }
+
+        if status == "paid":
+            paid_amount = response.amount_paid or response.amount or 0
+            if paid_amount > 0:
+                return VerifiedOutcome(
+                    **base_kwargs,
+                    status=VerificationStatus.RECOVERED,
+                    amount_recovered_minor=min(paid_amount, amount_at_risk_minor),
+                    provider_payment_id=response.payment_id,
+                    reason="Invoice status is 'paid' according to Razorpay.",
+                    evidence=evidence,
+                )
+
+        if status in {"issued", "unpaid", "partially_paid", "partially paid"}:
+            return VerifiedOutcome(
+                **base_kwargs,
+                status=VerificationStatus.PENDING,
+                amount_recovered_minor=0,
+                reason=f"Invoice status is '{status}'; awaiting full payment.",
+                evidence=evidence,
+            )
+
+        return VerifiedOutcome(
+            **base_kwargs,
+            status=VerificationStatus.UNKNOWN,
+            amount_recovered_minor=0,
+            reason=f"Unexpected invoice status: '{status}'.",
+            evidence=evidence,
+        )
 
     def _interpret(
         self,

@@ -39,11 +39,14 @@ class ExecutionStatus(str, Enum):
               This does NOT mean money was recovered.
     FAILED:   The capability action failed (e.g. Razorpay API error).
     BLOCKED:  The capability was not executed due to policy/guardrail block.
+    RECOVERY_ESCALATED: The internal terminal handoff was created; no recovery
+                        is implied.
     """
 
     EXECUTED = "executed"
     FAILED = "failed"
     BLOCKED = "blocked"
+    RECOVERY_ESCALATED = "recovery_escalated"
 
 
 # ---------------------------------------------------------------------------

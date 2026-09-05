@@ -79,7 +79,7 @@ def test_snapshot_exposes_available_diagnosis_decision_policy_and_execution(clie
     sessions.store(_session(signal=_signal(), case_id="case_snapshot"))
     _case_created(audit)
     audit.record(event_type=AuditEventType.DIAGNOSIS_CREATED, case_id="case_snapshot", merchant_id="merchant_snapshot", actor="agent", data={"category": "payment_failure", "primary_reason": "declined", "failure_stage": "payment_authorization", "confidence": 0.9, "diagnosis_source": "deterministic"})
-    audit.record(event_type=AuditEventType.DECISION_CREATED, case_id="case_snapshot", merchant_id="merchant_snapshot", actor="agent", data={"candidate_action_ids": ["payment_link_recovery"], "selected_capability_id": "payment_link_recovery", "decision_source": "contextual_bandit", "reason": "Eligible recovery action."})
+    audit.record(event_type=AuditEventType.DECISION_CREATED, case_id="case_snapshot", merchant_id="merchant_snapshot", actor="agent", data={"candidate_action_ids": ["payment_link_recovery"], "selected_capability_id": "payment_link_recovery", "selected_action_type": "create_payment_link", "decision_source": "contextual_bandit", "reason": "Eligible recovery action."})
     audit.record(event_type=AuditEventType.POLICY_DECISION, case_id="case_snapshot", merchant_id="merchant_snapshot", actor="policy", data={"verdict": "allow", "reasons": ["All policy checks passed."]})
     audit.record(event_type=AuditEventType.CAPABILITY_EXECUTED, case_id="case_snapshot", merchant_id="merchant_snapshot", actor="payment_link_recovery", execution_id="exec_snapshot", data={"status": "executed", "capability_id": "payment_link_recovery", "provider": "razorpay", "provider_reference": "plink_snapshot", "payment_link_url": "https://rzp.io/i/snapshot"})
 
@@ -87,9 +87,46 @@ def test_snapshot_exposes_available_diagnosis_decision_policy_and_execution(clie
 
     assert payload["diagnosis"]["failure_stage"] == "payment_authorization"
     assert payload["decision"]["selected_strategy"] == "payment_link_recovery"
+    assert payload["decision"]["selected_action_type"] == "create_payment_link"
     assert payload["policy"]["verdict"] == "allow"
     assert payload["execution"]["payment_link_url"] == "https://rzp.io/i/snapshot"
     assert payload["verification"] is None  # Execution is never represented as recovery.
+
+
+def test_reminder_does_not_replace_payment_link_recovery_execution(demo_state) -> None:
+    sessions, audit = demo_state
+    sessions.store(_session(signal=_signal(), case_id="case_snapshot"))
+    _case_created(audit)
+    audit.record(event_type=AuditEventType.CAPABILITY_EXECUTED, case_id="case_snapshot", merchant_id="merchant_snapshot", actor="payment_link_recovery", execution_id="exec_snapshot", data={"status": "executed", "capability_id": "payment_link_recovery", "provider": "razorpay", "provider_reference": "plink_snapshot", "payment_link_url": "https://rzp.io/i/snapshot"})
+    audit.record(event_type=AuditEventType.CAPABILITY_EXECUTED, case_id="case_snapshot", merchant_id="merchant_snapshot", actor="payment_link_reminder", execution_id="exec_reminder", data={"status": "executed", "capability_id": "payment_link_reminder", "provider": "razorpay", "provider_reference": "plink_snapshot"})
+    audit.record(event_type=AuditEventType.REMINDER_SENT, case_id="case_snapshot", merchant_id="merchant_snapshot", actor="payment_link_reminder_capability", execution_id="exec_reminder", data={"status": "executed", "capability_id": "payment_link_reminder", "payment_link_id": "plink_snapshot", "medium": "email"})
+
+    payload = demo.get_demo_status("demo_snapshot").model_dump(mode="json")
+
+    assert payload["execution"]["capability_id"] == "payment_link_recovery"
+    assert payload["execution"]["payment_link_url"] == "https://rzp.io/i/snapshot"
+    assert payload["reminder"] == {
+        "status": "executed", "payment_link_id": "plink_snapshot", "medium": "email",
+    }
+
+
+def test_snapshot_exposes_actual_invoice_execution_details(client: TestClient, demo_state) -> None:
+    sessions, audit = demo_state
+    sessions.store(_session(signal=_signal(), case_id="case_snapshot"))
+    _case_created(audit)
+    audit.record(event_type=AuditEventType.DECISION_CREATED, case_id="case_snapshot", merchant_id="merchant_snapshot", actor="agent", data={"candidate_action_ids": ["payment_link_recovery", "invoice_recovery"], "selected_capability_id": "invoice_recovery", "selected_action_type": "create_invoice", "decision_source": "contextual_bandit", "reason": "Eligible recovery action."})
+    audit.record(event_type=AuditEventType.CAPABILITY_EXECUTED, case_id="case_snapshot", merchant_id="merchant_snapshot", actor="invoice_recovery", execution_id="exec_invoice", data={"status": "executed", "provider": "razorpay", "provider_reference": "inv_snapshot", "payment_link_url": "https://rzp.io/i/invoice-snapshot"})
+
+    payload = client.get("/demo/demo_snapshot").json()
+
+    assert payload["decision"]["selected_strategy"] == "invoice_recovery"
+    assert payload["decision"]["selected_action_type"] == "create_invoice"
+    assert payload["execution"] == {
+        "execution_status": "executed", "execution_id": "exec_invoice",
+        "capability_id": "invoice_recovery", "provider": "razorpay",
+        "provider_reference": "inv_snapshot",
+        "payment_link_url": "https://rzp.io/i/invoice-snapshot", "error_message": None,
+    }
 
 
 def test_pending_unknown_and_verified_recovery_remain_distinct(client: TestClient, demo_state) -> None:
@@ -108,6 +145,37 @@ def test_pending_unknown_and_verified_recovery_remain_distinct(client: TestClien
     assert payload["verification"]["verification_status"] == "recovered"
     assert payload["verification"]["amount_recovered_minor"] == 10_000
     assert payload["learning"] == {"updated": True, "strategy": "payment_link_recovery", "outcome": "recovered", "context_key": "payment_failure|unknown|medium"}
+
+
+def test_escalation_suppresses_older_pending_verification(client: TestClient, demo_state) -> None:
+    sessions, audit = demo_state
+    sessions.store(_session(signal=_signal(), case_id="case_snapshot"))
+    _case_created(audit)
+    audit.record(event_type=AuditEventType.VERIFICATION_PENDING, case_id="case_snapshot", merchant_id="merchant_snapshot", actor="verification", data={"verification_status": "pending", "reason": "Awaiting payment."})
+    audit.record(event_type=AuditEventType.CAPABILITY_EXECUTED, case_id="case_snapshot", merchant_id="merchant_snapshot", actor="recovery_escalation", execution_id="exec_escalation", data={"status": "recovery_escalated", "capability_id": "recovery_escalation", "provider": "internal"})
+    audit.record(event_type=AuditEventType.RECOVERY_ESCALATED, case_id="case_snapshot", merchant_id="merchant_snapshot", actor="recovery_boundary", execution_id="exec_escalation", data={"next_action": "merchant_follow_up"})
+
+    payload = client.get("/demo/demo_snapshot").json()
+
+    assert payload["execution"]["execution_status"] == "recovery_escalated"
+    assert payload["verification"] is None
+
+
+def test_failed_execution_preserves_error_and_skips_verification_and_learning(client: TestClient, demo_state) -> None:
+    sessions, audit = demo_state
+    sessions.store(_session(signal=_signal(), case_id="case_snapshot"))
+    _case_created(audit)
+    audit.record(event_type=AuditEventType.CAPABILITY_EXECUTED, case_id="case_snapshot", merchant_id="merchant_snapshot", actor="payment_link_recovery", execution_id="exec_snapshot", data={"status": "failed", "capability_id": "payment_link_recovery", "provider": "razorpay", "error_message": "Test Mode payment-link limit reached."})
+    audit.record(event_type=AuditEventType.VERIFICATION_SKIPPED, case_id="case_snapshot", merchant_id="merchant_snapshot", actor="verification_service", execution_id="exec_snapshot", data={"reason": "Capability execution failed; verification was not run.", "execution_status": "failed"})
+    audit.record(event_type=AuditEventType.LEARNING_SKIPPED, case_id="case_snapshot", merchant_id="merchant_snapshot", actor="learning_service", execution_id="exec_snapshot", data={"reason": "Capability execution failed; learning was not updated.", "execution_status": "failed", "capability_id": "payment_link_recovery", "context_key": "payment_failure|unknown|medium", "learning_updated": False})
+
+    payload = client.get("/demo/demo_snapshot").json()
+
+    assert payload["execution"]["execution_status"] == "failed"
+    assert payload["execution"]["error_message"] == "Test Mode payment-link limit reached."
+    assert payload["verification"] is None
+    assert payload["learning"] == {"updated": False, "strategy": "payment_link_recovery", "outcome": None, "context_key": "payment_failure|unknown|medium"}
+    assert [event["event_type"] for event in payload["activity"][-2:]] == ["verification_skipped", "learning_skipped"]
 
 
 def test_snapshot_read_has_no_side_effects(client: TestClient, demo_state) -> None:

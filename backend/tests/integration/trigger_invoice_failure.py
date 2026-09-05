@@ -1,25 +1,16 @@
 #!/usr/bin/env python3
-"""Create one Razorpay Test Mode invoice for manual unpaid/expired testing.
+"""Manually validate Razorpay Test Mode invoice create-and-issue support.
 
-Uses documented Razorpay Invoices REST APIs:
-  - POST /v1/invoices
-  - POST /v1/invoices/{invoice_id}/issue
-
-No invoice tools exist in the project's Razorpay MCP namespace. MCP is not
-invocable from a local Python CLI, so this script calls Test Mode APIs via httpx.
-
-For invoices, failure means the receivable remains unpaid until it expires.
-Razorpay does not provide an immediate "overdue" API in Test Mode. The earliest
-supported expiry is 15 minutes after issue, after which status becomes expired.
+This development-only smoke script deliberately stays outside the recovery
+pipeline. An operator may supply an existing legitimate Test Mode customer, or
+create one from bounded operator-supplied demo details for this validation.
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
-import time
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import httpx
 
@@ -27,115 +18,148 @@ BACKEND_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.config import settings  # noqa: E402
+from app.integrations.razorpay.client import RazorpayPaymentLinkClient  # noqa: E402
 
-RAZORPAY_API_BASE = "https://api.razorpay.com/v1"
 TEST_KEY_PREFIX = "rzp_test_"
-INVOICE_AMOUNT_PAISE = 10000  # INR 100.00
-MIN_EXPIRE_AFTER_SECONDS = 16 * 60  # Razorpay requires expire_by >= 15 minutes ahead
+INVOICE_AMOUNT_PAISE = 10_000  # INR 100.00
+CUSTOMERS_URL = "https://api.razorpay.com/v1/customers"
+
+
+def _arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Create and issue one Razorpay Test Mode invoice."
+    )
+    customer_source = parser.add_mutually_exclusive_group(required=True)
+    customer_source.add_argument(
+        "--customer-id",
+        help="An existing legitimate Razorpay Test Mode customer ID (cust_...).",
+    )
+    customer_source.add_argument(
+        "--create-customer",
+        action="store_true",
+        help="Create a Razorpay Test Mode customer from the supplied demo details.",
+    )
+    parser.add_argument(
+        "--customer-name",
+        help="Bounded operator-supplied Test Mode customer name (required with --create-customer).",
+    )
+    parser.add_argument(
+        "--customer-email",
+        help="Bounded operator-supplied Test Mode customer email (required with --create-customer).",
+    )
+    parser.add_argument(
+        "--customer-contact",
+        help="Bounded operator-supplied Test Mode customer contact (required with --create-customer).",
+    )
+    return parser.parse_args()
 
 
 def _ensure_test_mode_credentials() -> None:
     if not settings.razorpay_key_id.startswith(TEST_KEY_PREFIX):
         print(
-            "error=refusing_to_run; configured RAZORPAY_KEY_ID is not a Test Mode key "
-            f"(expected prefix {TEST_KEY_PREFIX!r})",
+            "error=refusing_to_run; configured RAZORPAY_KEY_ID is not a Test Mode key",
             file=sys.stderr,
         )
         raise SystemExit(1)
 
 
-def _auth() -> tuple[str, str]:
-    return settings.razorpay_key_id, settings.razorpay_key_secret
+def _create_test_customer(args: argparse.Namespace) -> str | None:
+    """Create one Test Mode customer without extending the production client."""
+    customer_fields = {
+        "name": args.customer_name,
+        "email": args.customer_email,
+        "contact": args.customer_contact,
+    }
+    if any(not isinstance(value, str) or not value.strip() for value in customer_fields.values()):
+        print(
+            "error=customer_name_email_and_contact_are_required_with_create_customer",
+            file=sys.stderr,
+        )
+        return None
+    if any(len(value.strip()) > 120 for value in customer_fields.values()):
+        print("error=customer_fields_exceed_manual_tool_bounds", file=sys.stderr)
+        return None
 
+    try:
+        with httpx.Client(timeout=30.0) as http_client:
+            response = http_client.post(
+                CUSTOMERS_URL,
+                auth=(settings.razorpay_key_id, settings.razorpay_key_secret),
+                json={key: value.strip() for key, value in customer_fields.items()},
+            )
+        response.raise_for_status()
+        payload = response.json()
+    except (httpx.HTTPError, ValueError):
+        print("create_customer_status=failed", file=sys.stderr)
+        return None
 
-def _create_invoice(client: httpx.Client, *, expire_by: int) -> dict[str, Any]:
-    response = client.post(
-        "/invoices",
-        json={
-            "type": "invoice",
-            "description": "Integration test: deliberate unpaid invoice expiry",
-            "partial_payment": False,
-            "customer": {
-                "name": "Integration Test",
-                "contact": "9876543210",
-                "email": "integration.test@example.com",
-                "billing_address": {
-                    "line1": "Test Address Line 1",
-                    "line2": "Test Address Line 2",
-                    "zipcode": "560001",
-                    "city": "Bengaluru",
-                    "state": "Karnataka",
-                    "country": "in",
-                },
-            },
-            "line_items": [
-                {
-                    "name": "Integration test receivable",
-                    "description": "Unpaid invoice for webhook reconnaissance",
-                    "amount": INVOICE_AMOUNT_PAISE,
-                    "currency": "INR",
-                    "quantity": 1,
-                }
-            ],
-            "sms_notify": False,
-            "email_notify": False,
-            "currency": "INR",
-            "expire_by": expire_by,
-            "notes": {
-                "purpose": "trigger_invoice_failure",
-            },
-        },
-    )
-    response.raise_for_status()
-    return response.json()
+    customer_id = payload.get("id") if isinstance(payload, dict) else None
+    if not isinstance(customer_id, str) or not customer_id.startswith("cust_"):
+        print("create_customer_status=failed", file=sys.stderr)
+        return None
 
-
-def _issue_invoice(client: httpx.Client, *, invoice_id: str) -> dict[str, Any]:
-    response = client.post(f"/invoices/{invoice_id}/issue")
-    response.raise_for_status()
-    return response.json()
+    print(f"customer_id={customer_id}")
+    return customer_id
 
 
 def main() -> int:
+    args = _arguments()
     _ensure_test_mode_credentials()
+    customer_id = args.customer_id
+    if args.create_customer:
+        customer_id = _create_test_customer(args)
+        if customer_id is None:
+            return 1
+    elif not customer_id.startswith("cust_"):
+        print(
+            "error=customer_id_must_be_an_existing_razorpay_customer_id",
+            file=sys.stderr,
+        )
+        return 1
 
-    expire_by = int(time.time()) + MIN_EXPIRE_AFTER_SECONDS
-    expire_at = datetime.fromtimestamp(expire_by, tz=UTC).isoformat()
-
-    with httpx.Client(base_url=RAZORPAY_API_BASE, auth=_auth(), timeout=30.0) as client:
-        invoice = _create_invoice(client, expire_by=expire_by)
-        issued_invoice = _issue_invoice(client, invoice_id=invoice["id"])
-
-    invoice_id = issued_invoice["id"]
-    invoice_status = issued_invoice.get("status")
-    amount_due = issued_invoice.get("amount_due")
-    short_url = issued_invoice.get("short_url")
-
-    print(f"invoice_id={invoice_id}")
-    print(f"invoice_status={invoice_status}")
-    print(f"amount_due={amount_due}")
-    print(f"expire_by_unix={expire_by}")
-    print(f"expire_by_utc={expire_at}")
-    if short_url:
-        print(f"short_url={short_url}")
-
-    print()
-    print("MANUAL ACTION REQUIRED: DO NOT PAY THIS INVOICE.")
-    print(
-        "LEAVE IT UNPAID UNTIL expire_by IS REACHED. "
-        "RAZORPAY REQUIRES AT LEAST 15 MINUTES BEFORE AN ISSUED INVOICE CAN EXPIRE."
+    client = RazorpayPaymentLinkClient(
+        key_id=settings.razorpay_key_id,
+        key_secret=settings.razorpay_key_secret,
     )
-    print(f"WAIT UNTIL AT LEAST: {expire_at}")
-    print("CONFIRM invoice.expired IS ENABLED ON YOUR TEST MODE WEBHOOK SUBSCRIPTION.")
-    print("WATCH THE FASTAPI TERMINAL FOR POST /webhooks/razorpay.")
-    print("EXPECTED WEBHOOK EVENT WHEN THE INVOICE BECOMES OVERDUE: invoice.expired")
+    created = client.create_invoice(
+        amount_minor=INVOICE_AMOUNT_PAISE,
+        currency="INR",
+        description="RecoveryLab provider-layer Test Mode invoice",
+        customer_id=customer_id,
+        notes={
+            "capability_id": "invoice_recovery",
+            "recovery_system": "adaptive_revenue_recovery",
+        },
+    )
+    if not created.success or not created.invoice_id:
+        print("create_status=failed")
+        print(f"http_status={created.http_status_code}")
+        print(f"error={created.error_message}")
+        return 1
+
+    print(f"created_invoice_id={created.invoice_id}")
+    print(f"created_invoice_status={created.status}")
+    print(f"amount={created.amount}")
+    print(f"amount_due={created.amount_due}")
+    print(f"currency={created.currency}")
+
+    if created.status == "issued":
+        ready = created
+    else:
+        ready = client.issue_invoice(invoice_id=created.invoice_id)
+        if not ready.success or not ready.invoice_id:
+            print("issue_status=failed")
+            print(f"http_status={ready.http_status_code}")
+            print(f"error={ready.error_message}")
+            return 1
+
+    print(f"invoice_ready_status={ready.status}")
+    print(f"invoice_ready_id={ready.invoice_id}")
+    print(f"payment_url={ready.payment_url}")
+    print()
+    print("Open payment_url only if Razorpay returned one. Do not connect this invoice to recovery yet.")
     return 0
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except httpx.HTTPStatusError as exc:
-        print(f"razorpay_http_error={exc.response.status_code}", file=sys.stderr)
-        print(exc.response.text, file=sys.stderr)
-        raise SystemExit(1) from exc
+    raise SystemExit(main())

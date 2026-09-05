@@ -69,6 +69,7 @@ class DiagnosisSnapshot(BaseModel):
 class DecisionSnapshot(BaseModel):
     candidate_strategy_ids: list[str] = Field(default_factory=list)
     selected_strategy: str
+    selected_action_type: str | None = None
     decision_source: str
     reason: str
 
@@ -103,6 +104,12 @@ class LearningSnapshot(BaseModel):
     context_key: str | None = None
 
 
+class ReminderSnapshot(BaseModel):
+    status: str
+    payment_link_id: str | None = None
+    medium: str | None = None
+
+
 class ActivitySnapshot(BaseModel):
     event_type: str
     timestamp: datetime
@@ -121,6 +128,7 @@ class DemoStatusResponse(BaseModel):
     execution: ExecutionSnapshot | None = None
     verification: VerificationSnapshot | None = None
     learning: LearningSnapshot | None = None
+    reminder: ReminderSnapshot | None = None
     activity: list[ActivitySnapshot] = Field(default_factory=list)
 
 
@@ -150,6 +158,7 @@ def create_test_payment(request: TestPaymentRequest) -> TestPaymentResponse:
             order_id=result.order_id,
             amount_minor=result.amount if result.amount is not None else request.amount_minor,
             currency=result.currency or currency,
+            demo_customer_id=_demo_customer_id(),
         )
     )
     return TestPaymentResponse(
@@ -190,6 +199,7 @@ def get_demo_status(demo_id: str) -> DemoStatusResponse:
         execution=_execution_snapshot(events),
         verification=_verification_snapshot(events),
         learning=_learning_snapshot(events),
+        reminder=_reminder_snapshot(events),
         activity=[_activity_snapshot(event) for event in events],
     )
 
@@ -253,7 +263,9 @@ def _decision_snapshot(events: list[AuditEvent]) -> DecisionSnapshot | None:
     if not all((strategy, source, reason)):
         return None
     return DecisionSnapshot(candidate_strategy_ids=_strings(data.get("candidate_action_ids")),
-                            selected_strategy=strategy, decision_source=source, reason=reason)
+                            selected_strategy=strategy,
+                            selected_action_type=_str_or_none(data.get("selected_action_type")),
+                            decision_source=source, reason=reason)
 
 
 def _policy_snapshot(events: list[AuditEvent]) -> PolicySnapshot | None:
@@ -267,7 +279,17 @@ def _policy_snapshot(events: list[AuditEvent]) -> PolicySnapshot | None:
 
 
 def _execution_snapshot(events: list[AuditEvent]) -> ExecutionSnapshot | None:
-    event = _latest(events, AuditEventType.CAPABILITY_EXECUTED)
+    event = next(
+        (
+            item
+            for item in reversed(events)
+            if item.event_type == AuditEventType.CAPABILITY_EXECUTED
+            and (
+                _str_or_none(item.data.get("capability_id")) or item.actor
+            ) != "payment_link_reminder"
+        ),
+        None,
+    )
     if event is None:
         return None
     data = event.data
@@ -275,7 +297,11 @@ def _execution_snapshot(events: list[AuditEvent]) -> ExecutionSnapshot | None:
     if execution_status is None:
         return None
     return ExecutionSnapshot(execution_status=execution_status, execution_id=event.execution_id,
-                             capability_id=_str_or_none(data.get("capability_id")),
+                             # Capability execution events store the executed
+                             # capability as their actor. Keep supporting the
+                             # metadata form, but use the existing actor when
+                             # older/live events do not duplicate it in data.
+                             capability_id=_str_or_none(data.get("capability_id")) or event.actor,
                              provider=_str_or_none(data.get("provider")),
                              provider_reference=_str_or_none(data.get("provider_reference")),
                              payment_link_url=_str_or_none(data.get("payment_link_url")),
@@ -283,6 +309,8 @@ def _execution_snapshot(events: list[AuditEvent]) -> ExecutionSnapshot | None:
 
 
 def _verification_snapshot(events: list[AuditEvent]) -> VerificationSnapshot | None:
+    if _latest(events, AuditEventType.RECOVERY_ESCALATED) is not None:
+        return None
     event = next(
         (
             item for item in reversed(events)
@@ -318,6 +346,20 @@ def _learning_snapshot(events: list[AuditEvent]) -> LearningSnapshot | None:
                             context_key=_str_or_none(data.get("context_key")))
 
 
+def _reminder_snapshot(events: list[AuditEvent]) -> ReminderSnapshot | None:
+    event = _latest(events, AuditEventType.REMINDER_SENT)
+    if event is None:
+        return None
+    status = _str_or_none(event.data.get("status"))
+    if status is None:
+        return None
+    return ReminderSnapshot(
+        status=status,
+        payment_link_id=_str_or_none(event.data.get("payment_link_id")),
+        medium=_str_or_none(event.data.get("medium")),
+    )
+
+
 _ACTIVITY_KEYS = frozenset({"amount_at_risk_minor", "amount_recovered_minor", "currency", "risk_status", "recoverability", "urgency", "reason_codes", "selected_capability_id", "candidate_action_ids", "decision_source", "execution_status", "capability_id", "status", "provider", "provider_reference", "payment_link_url", "verification_status", "learning_updated", "context_key", "reason"})
 
 
@@ -340,3 +382,9 @@ def _int_or_zero(value: object) -> int:
 
 def _strings(value: object) -> list[str]:
     return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
+
+
+def _demo_customer_id() -> str | None:
+    """Return an explicitly configured Razorpay Test Mode customer ID only."""
+    customer_id = settings.demo_razorpay_customer_id
+    return customer_id if customer_id and customer_id.startswith("cust_") else None
